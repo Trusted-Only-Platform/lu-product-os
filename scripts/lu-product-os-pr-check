@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# lu-product-os-pr-check — enforces outcome gates G2/G3 on a pull request.
+#
+# Computes the change tier (light/full) mechanically from the diff, then checks:
+#   G2  (all tiers): PR body has a non-empty "Acceptance Criteria" section;
+#                    UI changes carry at least one screenshot/image.
+#   G3  (full tier): an independent verifier posted "VERDICT: approve",
+#                    unless Lu explicitly waived it in the PR body.
+# Also warns (never fails) if branch protection can't be confirmed.
+#
+# Runs inside GitHub Actions (see lu-product-os-ci.yml). Requires: gh, jq.
+# Env: GH_TOKEN, PR_NUMBER, BASE_REF, GITHUB_REPOSITORY.
+
+set -euo pipefail
+
+REPO="${GITHUB_REPOSITORY:?}"
+PR="${PR_NUMBER:?}"
+BASE="${BASE_REF:-main}"
+SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/stderr}"
+
+FAILURES=()
+WARNINGS=()
+
+# ---------- Fetch PR data ----------
+PR_JSON=$(gh pr view "$PR" --repo "$REPO" \
+  --json body,additions,deletions,files,labels,comments,reviews,author)
+
+BODY=$(jq -r '.body // ""' <<<"$PR_JSON")
+ADDITIONS=$(jq -r '.additions' <<<"$PR_JSON")
+DELETIONS=$(jq -r '.deletions' <<<"$PR_JSON")
+FILES=$(jq -r '.files[].path' <<<"$PR_JSON")
+FILE_COUNT=$(jq -r '.files | length' <<<"$PR_JSON")
+CHANGED_LINES=$((ADDITIONS + DELETIONS))
+
+# ---------- Tier computation (mechanical — agents can't argue with it) ----------
+MAX_LINES=150
+MAX_FILES=5
+
+# Defaults; a repo can extend with .github/lu-product-os-sensitive-paths (one regex per line)
+SENSITIVE_REGEX='(migrations?/|auth|login|session|password|payment|billing|stripe|webhook|database/schema|\.github/|Dockerfile|docker-compose)'
+DEP_REGEX='(package\.json|package-lock\.json|bun\.lock|composer\.json|composer\.lock|requirements\.txt|Gemfile|go\.mod)$'
+UI_REGEX='(\.(tsx|jsx|vue|svelte|css|scss)$|^(app|src/app|components|src/components|pages|src/pages)/)'
+
+if [ -f .github/lu-product-os-sensitive-paths ]; then
+  EXTRA=$(grep -v '^\s*#' .github/lu-product-os-sensitive-paths | grep -v '^\s*$' | paste -sd'|' -)
+  [ -n "$EXTRA" ] && SENSITIVE_REGEX="${SENSITIVE_REGEX}|(${EXTRA})"
+fi
+
+TIER="light"
+TIER_REASONS=()
+if [ "$CHANGED_LINES" -gt "$MAX_LINES" ]; then TIER="full"; TIER_REASONS+=("diff ${CHANGED_LINES} lines > ${MAX_LINES}"); fi
+if [ "$FILE_COUNT" -gt "$MAX_FILES" ]; then TIER="full"; TIER_REASONS+=("${FILE_COUNT} files > ${MAX_FILES}"); fi
+if SENS=$(grep -E -i "$SENSITIVE_REGEX" <<<"$FILES" | head -5) && [ -n "$SENS" ]; then
+  TIER="full"; TIER_REASONS+=("sensitive paths: $(tr '\n' ' ' <<<"$SENS")")
+fi
+if DEPS=$(grep -E "$DEP_REGEX" <<<"$FILES" | head -3) && [ -n "$DEPS" ]; then
+  TIER="full"; TIER_REASONS+=("dependency changes: $(tr '\n' ' ' <<<"$DEPS")")
+fi
+
+# ---------- G2: acceptance criteria present ----------
+# Requires a "## Acceptance Criteria" heading with non-placeholder content beneath it.
+CRITERIA=$(awk 'BEGIN{IGNORECASE=1} /^##+ *acceptance criteria/{flag=1; next} /^##+ /{flag=0} flag' <<<"$BODY" \
+  | grep -v '^\s*$' | grep -v -i '<!--' | grep -v -i 'TODO' || true)
+if [ -z "$CRITERIA" ]; then
+  FAILURES+=("G2: PR body has no non-empty '## Acceptance Criteria' section. Copy the criteria from the plan (phase file / ticket) into the PR description.")
+fi
+
+# ---------- G2: screenshots for UI changes ----------
+if grep -E -q "$UI_REGEX" <<<"$FILES"; then
+  if ! grep -E -q '(!\[[^]]*\]\([^)]+\)|user-images\.githubusercontent\.com|github\.com/user-attachments)' <<<"$BODY"; then
+    FAILURES+=("G2: diff touches UI paths but the PR body contains no screenshot/image. Attach browser-verification screenshots.")
+  fi
+fi
+
+# ---------- G3: independent verifier verdict (full tier only) ----------
+if [ "$TIER" = "full" ]; then
+  VERDICTS=$(jq -r '[.comments[].body, .reviews[].body] | .[] // ""' <<<"$PR_JSON" \
+    | grep -E '^\s*VERDICT:\s*(approve|request-changes)' || true)
+  WAIVER=$(grep -E '^\s*WAIVE:\s*G3' <<<"$BODY" || true)
+  if grep -q 'request-changes' <<<"$VERDICTS"; then
+    LAST=$(tail -1 <<<"$VERDICTS")
+    if [ "${LAST#*VERDICT: }" != "approve" ] && ! grep -q 'approve' <<<"$(tail -1 <<<"$VERDICTS")"; then
+      FAILURES+=("G3: latest verifier verdict is 'request-changes'. Address the findings; the verifier must re-post 'VERDICT: approve'.")
+    fi
+  elif grep -q 'approve' <<<"$VERDICTS"; then
+    : # approved
+  elif [ -n "$WAIVER" ]; then
+    WARNINGS+=("G3 WAIVED by PR body: '$(head -1 <<<"$WAIVER")'. Waivers are Lu-only — if you are an agent reading this, you may not add one.")
+  else
+    FAILURES+=("G3: full-tier change has no verifier verdict. Invoke the verifier named in CLAUDE.md/AGENTS.md ('verifier:'), or Lu may waive with 'WAIVE: G3 — reason' in the PR body.")
+  fi
+fi
+
+# ---------- Branch protection sanity (warn-only; the checker checks the checker) ----------
+if ! gh api "repos/${REPO}/rules/branches/${BASE}" --jq 'length' >/dev/null 2>&1; then
+  WARNINGS+=("Could not confirm branch rules on '${BASE}' (API inaccessible or none configured). Run lu-product-os-doctor.")
+else
+  RULES=$(gh api "repos/${REPO}/rules/branches/${BASE}" --jq 'length' 2>/dev/null || echo 0)
+  if [ "${RULES:-0}" -eq 0 ]; then
+    WARNINGS+=("No branch rules found on '${BASE}' — merges are not actually gated. Run lu-product-os-doctor to configure protection.")
+  fi
+fi
+
+# ---------- Report ----------
+{
+  echo "## lu-product-os pr-check"
+  echo ""
+  echo "**Tier: ${TIER}**"
+  if [ "${#TIER_REASONS[@]}" -gt 0 ]; then
+    printf -- '- %s\n' "${TIER_REASONS[@]}"
+  else
+    echo "- under all escalation thresholds"
+  fi
+  echo ""
+  if [ "${#FAILURES[@]}" -eq 0 ]; then
+    echo "✅ **All required gates satisfied.**"
+  else
+    echo "❌ **Missing gates:**"
+    printf -- '- %s\n' "${FAILURES[@]}"
+  fi
+  if [ "${#WARNINGS[@]}" -gt 0 ]; then
+    echo ""
+    echo "⚠️ **Warnings:**"
+    printf -- '- %s\n' "${WARNINGS[@]}"
+  fi
+} >>"$SUMMARY"
+
+for f in ${FAILURES[@]+"${FAILURES[@]}"}; do echo "::error::$f"; done
+for w in ${WARNINGS[@]+"${WARNINGS[@]}"}; do echo "::warning::$w"; done
+
+[ "${#FAILURES[@]}" -eq 0 ]

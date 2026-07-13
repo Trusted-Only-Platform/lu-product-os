@@ -1,0 +1,66 @@
+# lu-product-os — reusable CI workflow.
+# Projects do NOT copy this file. They copy templates/lu-product-os-ci-caller.yml
+# (≈12 lines) into their own .github/workflows/, which calls this one.
+# Central changes here propagate to every project instantly.
+
+name: lu-product-os-ci
+
+on:
+  workflow_call:
+    inputs:
+      verify-command:
+        description: "Command that runs the project's full quality gates"
+        type: string
+        required: false
+        default: ./scripts/lu-product-os-verify
+      central-repo:
+        description: "owner/name of the lu-product-os repo (for pr-check script)"
+        type: string
+        required: false
+        default: ${{ github.repository_owner }}/lu-product-os
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run project quality gates
+        run: |
+          CMD="${{ inputs.verify-command }}"
+          if [ "$CMD" = "./scripts/lu-product-os-verify" ] && [ ! -x "$CMD" ]; then
+            echo "::error::No executable scripts/lu-product-os-verify found. Run lu-product-os-doctor to scaffold it."
+            exit 1
+          fi
+          $CMD
+
+  pr-check:
+    name: pr-check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch lu-product-os scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.central-repo }}
+          path: .lu-product-os
+          # Works as-is when lu-product-os is public. If it is private, this repo
+          # needs a token with read access to it — set org/repo secret
+          # LU_PRODUCT_OS_TOKEN and uncomment the next line.
+          # token: ${{ secrets.LU_PRODUCT_OS_TOKEN }}
+
+      - name: Run pr-check (gates G2/G3 + tier computation)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: bash .lu-product-os/scripts/lu-product-os-pr-check

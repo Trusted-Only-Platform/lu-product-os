@@ -1,0 +1,17 @@
+# lu-product-os CI caller — copy into a project as .github/workflows/lu-product-os-ci.yml
+# (lu-product-os-doctor does this for you). Replace OWNER with the org/user that
+# hosts the lu-product-os repo. The real workflow lives centrally and propagates
+# to every project; do not add steps here — improve the central one.
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  lu-product-os:
+    uses: OWNER/lu-product-os/.github/workflows/lu-product-os-ci.yml@main
+    secrets: inherit
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read

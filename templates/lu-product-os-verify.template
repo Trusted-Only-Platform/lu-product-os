@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# lu-product-os-verify — this project's full quality gates in one command.
+# Copy to scripts/lu-product-os-verify, make executable, and adapt to the stack.
+# (lu-product-os-doctor scaffolds a stack-detected version of this for you.)
+#
+# CONTRACT (gate G1):
+#   - Running this script IS the definition of "the code is correct".
+#   - CI runs exactly this script on a clean checkout; agents run it locally.
+#   - It must install its own dependencies (CI starts from nothing).
+#   - Exit 0 only when typecheck + lint + tests + build ALL pass.
+set -euo pipefail
+
+# --- Node/npm example -------------------------------------------------------
+# npm ci
+# npx tsc --noEmit
+# npm run lint
+# npm test
+# npm run build
+
+# --- Bun example ------------------------------------------------------------
+# curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 || true
+# export PATH="$HOME/.bun/bin:$PATH"
+# bun install --frozen-lockfile
+# bun run typecheck && bun run lint && bun test && bun run build
+
+# --- Laravel/PHP example ----------------------------------------------------
+# composer install --no-interaction --prefer-dist
+# ./vendor/bin/pint --test
+# php artisan test
+
+echo "TODO: replace with this project's real gates" && exit 1

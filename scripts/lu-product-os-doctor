@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# lu-product-os-doctor — idempotent setup, check, and repair for a project repo.
+#
+# Setup, check, and repair are the same command:
+#   lu-product-os-doctor            check everything, repair what it safely can
+#   lu-product-os-doctor --quick    read-only check (~seconds); prints the
+#                                   machinery banner agents show at session start
+#
+# Run from the root of a project repo. Requires: git, gh (authenticated), jq.
+# Env override: LU_PRODUCT_OS_REPO=owner/name   (default: <origin owner>/lu-product-os)
+
+set -uo pipefail
+
+QUICK=false
+[ "${1:-}" = "--quick" ] && QUICK=true
+
+BOLD=$(tput bold 2>/dev/null || true); RESET=$(tput sgr0 2>/dev/null || true)
+declare -a REPORT
+STATUS_WORST=0   # 0=full, 1=partial, 2=none
+
+note()   { REPORT+=("OK     $1"); }
+fixed()  { REPORT+=("FIXED  $1"); }
+warn()   { REPORT+=("WARN   $1"); [ $STATUS_WORST -lt 1 ] && STATUS_WORST=1; }
+fail()   { REPORT+=("FAIL   $1"); STATUS_WORST=2; }
+
+# ---------- 0. Preconditions ----------
+command -v gh >/dev/null || { echo "gh CLI is required (https://cli.github.com)"; exit 1; }
+command -v jq >/dev/null || { echo "jq is required"; exit 1; }
+
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  fail "Not a git repository. Run 'git init' first (or cd into the project repo)."
+  STATUS=none
+else
+  # ---------- 1. Remote ----------
+  ORIGIN=$(git remote get-url origin 2>/dev/null || true)
+  if [ -z "$ORIGIN" ]; then
+    fail "No 'origin' remote — work here is unbacked-up and invisible to CI. Create a GitHub repo and push."
+  else
+    note "origin: $ORIGIN"
+  fi
+
+  OWNER=$(sed -E 's#(git@github\.com:|https://github\.com/)([^/]+)/.*#\2#' <<<"$ORIGIN" 2>/dev/null || true)
+  CENTRAL="${LU_PRODUCT_OS_REPO:-${OWNER:-OWNER}/lu-product-os}"
+  DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null || echo main)
+  NWO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)
+
+  # ---------- 2. verify script ----------
+  VERIFY=scripts/lu-product-os-verify
+  if [ -x "$VERIFY" ]; then
+    note "$VERIFY exists and is executable"
+  elif $QUICK; then
+    warn "$VERIFY missing — CI gate G1 cannot run"
+  else
+    mkdir -p scripts
+    {
+      echo '#!/usr/bin/env bash'
+      echo '# lu-product-os-verify — this project'\''s full quality gates in one command.'
+      echo '# CI runs exactly this script (gate G1). Keep it the single source of truth.'
+      echo 'set -euo pipefail'
+      echo ''
+      if [ -f bun.lock ] || [ -f bun.lockb ]; then
+        echo 'curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 || true'
+        echo 'export PATH="$HOME/.bun/bin:$PATH"'
+        echo 'bun install --frozen-lockfile'
+        echo 'bun run typecheck   # TODO: confirm script names in package.json'
+        echo 'bun run lint'
+        echo 'bun test'
+        echo 'bun run build'
+      elif [ -f package.json ]; then
+        echo 'npm ci'
+        echo 'npx tsc --noEmit                       # TODO: adjust to this project'
+        echo 'npm run lint --if-present'
+        echo 'npm test --if-present'
+        echo 'npm run build --if-present'
+      elif [ -f composer.json ]; then
+        echo 'composer install --no-interaction --prefer-dist'
+        echo './vendor/bin/pint --test               # TODO: adjust to this project'
+        echo 'php artisan test'
+      else
+        echo 'echo "TODO: add this project'\''s typecheck/lint/test/build commands" && exit 1'
+      fi
+    } >"$VERIFY"
+    chmod +x "$VERIFY"
+    fixed "$VERIFY scaffolded from detected stack — review the TODO lines before relying on it"
+  fi
+
+  # ---------- 3. CI caller workflow ----------
+  CALLER=.github/workflows/lu-product-os-ci.yml
+  if [ -f "$CALLER" ]; then
+    note "$CALLER present"
+  elif $QUICK; then
+    warn "$CALLER missing — no CI runs on PRs"
+  else
+    mkdir -p .github/workflows
+    cat >"$CALLER" <<EOF
+# lu-product-os CI caller — the real workflow lives in ${CENTRAL} and
+# propagates to every project. Do not add steps here; improve the central one.
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [${DEFAULT_BRANCH}]
+jobs:
+  lu-product-os:
+    uses: ${CENTRAL}/.github/workflows/lu-product-os-ci.yml@main
+    secrets: inherit
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+EOF
+    fixed "$CALLER created (calls ${CENTRAL})"
+  fi
+
+  # ---------- 4. PR template ----------
+  PRT=.github/pull_request_template.md
+  if [ -f "$PRT" ]; then
+    note "$PRT present"
+  elif gh api "repos/${OWNER}/.github/contents/.github/pull_request_template.md" >/dev/null 2>&1; then
+    note "org-level default PR template found (${OWNER}/.github)"
+  elif $QUICK; then
+    warn "no PR template (repo or org) — gate G2 content won't be prompted"
+  else
+    mkdir -p .github
+    if gh api "repos/${CENTRAL}/contents/templates/lu-product-os-pull-request-template.md" \
+        --jq .content 2>/dev/null | base64 -d >"$PRT" 2>/dev/null && [ -s "$PRT" ]; then
+      fixed "$PRT installed from ${CENTRAL}"
+    else
+      rm -f "$PRT"
+      warn "could not fetch PR template from ${CENTRAL} — install it manually from templates/"
+    fi
+  fi
+
+  # ---------- 5. Agent entry files ----------
+  if [ -f AGENTS.md ] || [ -f CLAUDE.md ]; then
+    ENTRY=$( [ -f CLAUDE.md ] && echo CLAUDE.md || echo AGENTS.md )
+    note "$ENTRY present"
+    grep -qiE '^\s*-?\s*\*{0,2}profile:?\*{0,2}\s*(prototype|standard|production)' "$ENTRY" 2>/dev/null \
+      || warn "$ENTRY has no 'profile:' line (prototype|standard|production) — tiers/gates can't calibrate"
+    grep -qiE '^\s*-?\s*\*{0,2}verifier:?\*{0,2}\s*\S' "$ENTRY" 2>/dev/null \
+      || warn "$ENTRY has no 'verifier:' line — full-tier changes can't request independent verification"
+  else
+    warn "no CLAUDE.md or AGENTS.md — agents have no project entry point (see templates/lu-product-os-AGENTS-stub.md in ${CENTRAL})"
+  fi
+
+  # ---------- 6. Branch protection ----------
+  if [ -n "$NWO" ]; then
+    RULES=$(gh api "repos/${NWO}/rules/branches/${DEFAULT_BRANCH}" --jq 'length' 2>/dev/null || echo "")
+    PROT=$(gh api "repos/${NWO}/branches/${DEFAULT_BRANCH}/protection" --jq '.required_status_checks.contexts | length' 2>/dev/null || echo "")
+    if [ -n "$RULES" ] && [ "$RULES" -gt 0 ] || [ -n "$PROT" ]; then
+      note "branch rules/protection active on ${DEFAULT_BRANCH}"
+    elif $QUICK; then
+      fail "no branch protection on ${DEFAULT_BRANCH} — nothing enforces the gates"
+    else
+      if gh api -X PUT "repos/${NWO}/branches/${DEFAULT_BRANCH}/protection" \
+          --input - >/dev/null 2>&1 <<'JSON'
+{
+  "required_status_checks": { "strict": true, "contexts": ["lu-product-os / verify", "lu-product-os / pr-check"] },
+  "enforce_admins": true,
+  "required_pull_request_reviews": null,
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+JSON
+      then
+        fixed "branch protection set on ${DEFAULT_BRANCH} (PR required; checks: verify, pr-check; applies to admins)"
+      else
+        fail "could not set branch protection (private repo on free plan, or insufficient permissions). Options: upgrade plan, make repo public, or configure an org ruleset."
+      fi
+    fi
+  fi
+fi
+
+# ---------- Banner + report ----------
+case $STATUS_WORST in
+  0) BANNER="Machinery: full" ;;
+  1) BANNER="Machinery: partial — see warnings" ;;
+  2) BANNER="Machinery: none/broken — gates are NOT enforced; agents run in prompt mode" ;;
+esac
+
+echo ""
+echo "${BOLD}lu-product-os doctor — $(basename "$(pwd)")${RESET}"
+printf '  %s\n' "${REPORT[@]}"
+echo ""
+echo "${BOLD}${BANNER}${RESET}"
+$QUICK || echo "Next: open a trivial canary PR and confirm the checks run AND block before real work."
+exit $([ $STATUS_WORST -eq 2 ] && echo 1 || echo 0)

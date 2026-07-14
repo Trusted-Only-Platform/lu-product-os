@@ -147,6 +147,12 @@ EOF
   if [ -n "$NWO" ]; then
     RULES=$(gh api "repos/${NWO}/rules/branches/${DEFAULT_BRANCH}" --jq 'length' 2>/dev/null || echo "")
     PROT=$(gh api "repos/${NWO}/branches/${DEFAULT_BRANCH}/protection" --jq '.required_status_checks.contexts | length' 2>/dev/null || echo "")
+    # On an HTTP error (e.g. 403: private repo on a free plan) gh api dumps the
+    # error JSON to stdout, so RULES/PROT hold a JSON body, not a count — which
+    # made the test below report protection as active when none exists. Keep
+    # only clean numeric values; anything else means "could not confirm".
+    case "$RULES" in ''|*[!0-9]*) RULES="" ;; esac
+    case "$PROT"  in ''|*[!0-9]*) PROT=""  ;; esac
     if [ -n "$RULES" ] && [ "$RULES" -gt 0 ] || [ -n "$PROT" ]; then
       note "branch rules/protection active on ${DEFAULT_BRANCH}"
     elif $QUICK; then

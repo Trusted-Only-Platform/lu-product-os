@@ -176,6 +176,45 @@ JSON
       fi
     fi
   fi
+
+  # ---------- 7. Live infrastructure (full mode only) ----------
+  # Documented infra rots and becomes an accident vector; verify it live instead.
+  # Runs ONLY in full mode — --quick must stay fast for session startup.
+  if ! $QUICK; then
+    # Railway
+    if [ -f railway.json ] || [ -f railway.toml ] || [ -n "${RAILWAY_ENVIRONMENT_NAME:-}" ]; then
+      if ! command -v railway >/dev/null; then
+        warn "Railway config detected but railway CLI not installed — live infra cannot be verified (npm i -g @railway/cli)"
+      elif ! railway whoami >/dev/null 2>&1; then
+        warn "railway CLI not authenticated — run 'railway login' (agents cannot derive hosts/services until then)"
+      else
+        RSTATUS=$(railway status --json 2>/dev/null || true)
+        if [ -z "$RSTATUS" ]; then
+          fail "railway CLI authenticated but no project linked here — run 'railway link'. Proxy hosts and service lists cannot be derived; do NOT fall back to documented values."
+        else
+          # TODO: confirm these jq paths against your installed railway CLI version
+          RPROJ=$(jq -r '.name // empty' <<<"$RSTATUS" 2>/dev/null)
+          RENV=$(jq -r '.environment.name // .environment // empty' <<<"$RSTATUS" 2>/dev/null)
+          RSVCS=$(jq -r '[.services[]?.name // empty] | join(", ")' <<<"$RSTATUS" 2>/dev/null)
+          note "railway linked: project=${RPROJ:-?} env=${RENV:-?} services=[${RSVCS:-unresolved}]"
+          if [ -n "${RAILWAY_ENVIRONMENT_NAME:-}" ] && [ -n "$RENV" ] && [ "$RAILWAY_ENVIRONMENT_NAME" != "$RENV" ]; then
+            fail "RAILWAY_ENVIRONMENT_NAME='$RAILWAY_ENVIRONMENT_NAME' but linked environment is '$RENV' — derived proxy hosts will point at the WRONG environment"
+          fi
+          [ -n "$RENV" ] || warn "railway environment unresolved — hosts derived from RAILWAY_ENVIRONMENT_NAME cannot be trusted"
+        fi
+      fi
+    fi
+    # Vercel
+    if [ -f vercel.json ] || [ -d .vercel ]; then
+      if ! command -v vercel >/dev/null; then
+        warn "Vercel config detected but vercel CLI not installed — live infra cannot be verified"
+      elif [ ! -f .vercel/project.json ]; then
+        warn "Vercel config present but project not linked here — run 'vercel link'"
+      else
+        note "vercel linked: project=$(jq -r '.projectId // "?"' .vercel/project.json 2>/dev/null)"
+      fi
+    fi
+  fi
 fi
 
 # ---------- Banner + report ----------

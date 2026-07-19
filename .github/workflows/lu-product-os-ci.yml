@@ -22,7 +22,10 @@ on:
 jobs:
   verify:
     name: verify
+    if: github.event_name != 'issue_comment'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -64,3 +67,52 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: bash .lu-product-os/scripts/lu-product-os-pr-check
+
+  # Comments don't re-trigger pull_request workflows, so without this job a
+  # full-tier PR born red on G3 stays red even after the verifier posts
+  # "VERDICT: approve" — until someone pushes or re-runs manually. This job
+  # fires on verdict comments and re-runs the failed pr-check of the PR's
+  # latest CI run, so the check flips on the PR head SHA itself.
+  # Requires the caller to trigger on `issue_comment: types: [created]` and
+  # grant `actions: write` (see templates/lu-product-os-ci-caller.yml).
+  retrigger-pr-check:
+    name: retrigger-pr-check
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, 'VERDICT:')
+    runs-on: ubuntu-latest
+    # No permissions block on purpose: this job inherits whatever the caller
+    # grants (updated callers grant `actions: write`). Declaring it here would
+    # fail plan-time validation for projects still on the old caller — even
+    # though this job never runs for them (no issue_comment trigger).
+    steps:
+      - name: Re-run failed pr-check on this PR's latest CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
+          RUN=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?event=pull_request&head_sha=${HEAD_SHA}" \
+            | jq --arg wn "$WORKFLOW_NAME" \
+                '[.workflow_runs[] | select(.name == $wn)] | sort_by(.created_at) | last // empty')
+          if [ -z "$RUN" ]; then
+            echo "::notice::No pull_request CI run found for head ${HEAD_SHA} — nothing to re-trigger."
+            exit 0
+          fi
+          RUN_ID=$(jq -r '.id' <<<"$RUN")
+          STATUS=$(jq -r '.status' <<<"$RUN")
+          CONCLUSION=$(jq -r '.conclusion' <<<"$RUN")
+          if [ "$STATUS" != "completed" ]; then
+            echo "::notice::Run ${RUN_ID} is still in progress — its pr-check will read the fresh verdict on its own."
+            exit 0
+          fi
+          if [ "$CONCLUSION" = "success" ]; then
+            echo "::notice::Run ${RUN_ID} is already green — nothing to re-run."
+            exit 0
+          fi
+          echo "Verdict comment by ${COMMENTER} — re-running failed jobs of run ${RUN_ID}."
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/rerun-failed-jobs"

@@ -87,7 +87,11 @@ else
   # ---------- 3. CI caller workflow ----------
   CALLER=.github/workflows/lu-product-os-ci.yml
   if [ -f "$CALLER" ]; then
-    note "$CALLER present"
+    if grep -q 'issue_comment' "$CALLER" && grep -q 'actions: write' "$CALLER"; then
+      note "$CALLER present"
+    else
+      warn "$CALLER predates the verdict re-trigger — pr-check stays red after 'VERDICT: approve' until a push. Add 'issue_comment: types: [created]' under on: and 'actions: write' under permissions (see ${CENTRAL} templates/lu-product-os-ci-caller.yml)"
+    fi
   elif $QUICK; then
     warn "$CALLER missing — no CI runs on PRs"
   else
@@ -100,6 +104,8 @@ on:
   pull_request:
   push:
     branches: [${DEFAULT_BRANCH}]
+  issue_comment:        # lets a "VERDICT:" comment re-run a red pr-check
+    types: [created]
 jobs:
   lu-product-os:
     uses: ${CENTRAL}/.github/workflows/lu-product-os-ci.yml@main
@@ -108,6 +114,7 @@ jobs:
       contents: read
       pull-requests: read
       issues: read
+      actions: write    # retrigger-pr-check re-runs the failed job
 EOF
     fixed "$CALLER created (calls ${CENTRAL})"
   fi

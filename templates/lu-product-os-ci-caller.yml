@@ -7,6 +7,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  issue_comment:        # lets a "VERDICT:" comment re-run a red pr-check
+    types: [created]
 jobs:
   lu-product-os:
     uses: OWNER/lu-product-os/.github/workflows/lu-product-os-ci.yml@main
@@ -15,3 +17,4 @@ jobs:
       contents: read
       pull-requests: read
       issues: read
+      actions: write    # retrigger-pr-check re-runs the failed job

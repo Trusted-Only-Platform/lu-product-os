@@ -20,8 +20,11 @@
 #     changes earn independent tests).
 #   v3.2 changes:
 #   - Critical-path patterns are segment-anchored: "auth" no longer matches
-#     AuthorCard.tsx; "session" no longer matches SessionList.tsx. Extend
-#     per-repo domain terms via .github/lu-product-os-sensitive-paths.
+#     AuthorCard.tsx; "session" no longer matches SessionList.tsx. Auth
+#     spellings are enumerated rather than prefix-matched, because "auth" is a
+#     prefix of both "authentication" (critical) and "author" (not) — anchoring
+#     alone cannot tell them apart. Extend per-repo domain terms via
+#     .github/lu-product-os-sensitive-paths.
 #   - Dependency escalation now requires a LOCKFILE change. Editing a script
 #     in package.json is not a dependency change.
 #   - File-count-only escalation removed (mechanical sweeps were escalating
@@ -58,9 +61,12 @@ MAX_LINES=300
 
 # Critical paths: being wrong here is expensive and quiet. Full verification.
 # Patterns are anchored to path-segment boundaries so substrings don't false-
-# positive (AuthorCard.tsx, SessionList.tsx). Domain terms that ARE critical in
-# this repo go in .github/lu-product-os-sensitive-paths (one regex per line).
-CRITICAL_REGEX='(^|/|[-_.])(migrations?|auth|login|sessions?|passwords?|payments?|billing|stripe|webhooks?)([-_./]|$)|database/schema'
+# positive (AuthorCard.tsx, SessionList.tsx). Auth spellings are enumerated
+# rather than matched as the prefix "auth[a-z]*": that prefix also matches
+# author/authoring, which is what the anchoring was added to exclude. Add
+# spellings here, not a wildcard. Domain terms that ARE critical in this repo
+# go in .github/lu-product-os-sensitive-paths (one regex per line).
+CRITICAL_REGEX='(^|/|[-_.])(migrations?|auth|authn|authz|authentication|authoriz(e|ation)|oauth[0-9]*|login|sessions?|passwords?|payments?|billing|stripe|webhooks?)([-_./]|$)|database/schema'
 # Infra plumbing: being wrong here fails loudly at deploy/CI. Review-only verification.
 INFRA_REGEX='(\.github/|Dockerfile|docker-compose)'
 # Dependency escalation keys on LOCKFILES: a real dependency change always

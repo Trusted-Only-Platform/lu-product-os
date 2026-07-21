@@ -72,7 +72,13 @@ INFRA_REGEX='(\.github/|Dockerfile|docker-compose)'
 # Dependency escalation keys on LOCKFILES: a real dependency change always
 # touches one; a package.json script edit does not.
 DEP_REGEX='(^|/)(package-lock\.json|bun\.lockb?|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Gemfile\.lock|go\.sum|requirements\.txt)$'
-UI_REGEX='(\.(tsx|jsx|vue|svelte|css|scss)$|^(app|src/app|components|src/components|pages|src/pages)/)'
+# A UI file has a front-end extension, OR sits under a front-end directory AND has a
+# web extension. The directory alternation must not stand alone: `app/` is Next.js's
+# App Router but it is equally Laravel's entire PHP source tree, so a bare `^app/`
+# demanded browser screenshots for every backend-only PR in a Laravel repo — and G2
+# has no waiver path, so nothing in the PR could clear it. (Hit on TRU-7, TRU-14 and
+# TRU-28.) Requiring a web extension keeps every genuine JS/TS hit and drops that.
+UI_REGEX='(\.(tsx|jsx|vue|svelte|css|scss)$|^(app|src/app|components|src/components|pages|src/pages)/.*\.(tsx|ts|jsx|js|mjs|cjs|vue|svelte|css|scss|sass|less|html|mdx)$)'
 # Excluded from SIZE counts only (still scanned for critical/infra/dep matches):
 EXCLUDE_COUNT_REGEX='(\.(test|spec)\.[A-Za-z]+$|__tests__/|(^|/)tests?/|(^|/)e2e/|\.snap$|(^|/)(package-lock\.json|bun\.lockb?|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Gemfile\.lock|go\.sum)$|\.md$|^0-(plan|documentation-codebase|wip)/|(^|/)docs/)'
 

@@ -24,7 +24,9 @@ The central machinery for Lu's product development process. Every project **inhe
 | G4 | Accepted — Lu walks the preview, Lu presses merge | branch protection | full |
 | G5 | Hygienic — docs regenerated, ticket linked | post-merge automation | all |
 
-**Tier escalates to full** (mechanically, in `pr-check`) when: diff > 150 lines or > 5 files · touches migrations/auth/payments/`.github`/Docker · changes dependencies. Extend per-repo via `.github/lu-product-os-sensitive-paths` (one regex per line).
+**Tier escalates to full** (mechanically, in `pr-check`) when: counted diff > 300 lines · touches migrations/auth/payments/`.github`/Docker (path-segment matched) · changes a lockfile (real dependency change). File count alone never escalates. Extend per-repo via `.github/lu-product-os-sensitive-paths` (one regex per line).
+
+**Detection mode (free plan):** private repos on GitHub Free can't have branch protection, so merges aren't blocked there. The `main-guard` job in the central workflow runs on every push to the default branch and raises a red run + labeled issue for any merge that didn't come from a green PR. Doctor reports this configuration as detection mode.
 
 ## Setting up a project
 
@@ -57,3 +59,5 @@ my-project/
 ## For agents landing in this repo
 
 You maintain the process, not a product. Changes here affect **every** project on their next CI run — treat edits like production deploys: small PRs, and test workflow changes against a sandbox repo before merging. The protocol you follow while doing so is [`lu-product-os-EXECUTION-PROTOCOL.md`](lu-product-os-EXECUTION-PROTOCOL.md), same as everywhere else.
+
+**The friction rule:** this OS changes only when a real project PR hits the same friction **twice**. No speculative process tuning — process iteration is itself a build-time sink, and untested "improvements" are how machinery rots. If you (or Lu) feel an urge to improve the process, log the friction instance somewhere findable and wait for the second occurrence.

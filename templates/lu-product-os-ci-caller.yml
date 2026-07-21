@@ -16,5 +16,5 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-      issues: read
+      issues: write     # main-guard files an alert issue on unverified merges
       actions: write    # retrigger-pr-check re-runs the failed job

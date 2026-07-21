@@ -29,6 +29,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Dependency caching — cuts install time on every CI round trip.
+      - name: Setup Node with npm cache
+        if: hashFiles('package-lock.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Setup Bun
+        if: hashFiles('bun.lock', 'bun.lockb') != ''
+        uses: oven-sh/setup-bun@v2
+
+      - name: Bun install cache
+        if: hashFiles('bun.lock', 'bun.lockb') != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock', 'bun.lockb') }}
+
+      - name: Composer cache
+        if: hashFiles('composer.lock') != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/composer
+          key: composer-${{ runner.os }}-${{ hashFiles('composer.lock') }}
+
       - name: Run project quality gates
         run: |
           CMD="${{ inputs.verify-command }}"
@@ -67,6 +93,71 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: bash .lu-product-os/scripts/lu-product-os-pr-check
+
+  # Free-plan DETECTION MODE: GitHub Free can't enforce branch protection on
+  # private repos, so merges cannot be blocked. This job runs on every push to
+  # the default branch and verifies the pushed commit came from a pull request
+  # with no failing checks. It cannot prevent a bad merge — it makes one loud
+  # within minutes: a ::error, a red run on main, and a labeled issue. Doctor
+  # reports this configuration as "detection mode". Docs-only pushes (e.g. doc
+  # regeneration) are exempt.
+  main-guard:
+    name: main-guard
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # No permissions block on purpose (same reason as retrigger-pr-check below):
+    # declaring `issues: write` here would fail plan-time validation for
+    # projects still on an older caller that grants only `issues: read`.
+    # Updated callers grant it; on old callers the issue-create step no-ops
+    # and the ::error + red run still fire.
+    steps:
+      - name: Verify this push came from a green PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          R="$GITHUB_REPOSITORY"
+          VIOLATION=""
+
+          # Exempt docs-only pushes (doc regeneration, plan edits, markdown).
+          FILES=$(gh api "repos/$R/commits/$SHA" --jq '[.files[].filename] | join("\n")' 2>/dev/null || true)
+          if [ -n "$FILES" ] && ! grep -vE '^(0-documentation-codebase/|0-plan/|0-wip/|.*\.md$)' <<<"$FILES" >/dev/null; then
+            echo "Docs-only push — exempt."
+            exit 0
+          fi
+
+          PR_COUNT=$(gh api "repos/$R/commits/$SHA/pulls" --jq 'length' 2>/dev/null || echo 0)
+          if [ "${PR_COUNT:-0}" -eq 0 ]; then
+            VIOLATION="Commit $SHA landed on ${GITHUB_REF_NAME} with no associated pull request (direct push)."
+          else
+            PR=$(gh api "repos/$R/commits/$SHA/pulls" --jq '.[0].number')
+            BAD=$(gh pr view "$PR" --repo "$R" --json statusCheckRollup \
+              --jq '[.statusCheckRollup[]? | select((.conclusion // .state // "") | test("FAILURE|CANCELLED|TIMED_OUT|ERROR"; "i"))] | length' 2>/dev/null || echo 0)
+            if [ "${BAD:-0}" -gt 0 ]; then
+              VIOLATION="PR #$PR was merged with ${BAD} failing check(s) (commit $SHA)."
+            fi
+          fi
+
+          if [ -z "$VIOLATION" ]; then
+            echo "Push verified: came from a PR with no failing checks."
+            exit 0
+          fi
+
+          echo "::error::main-guard: $VIOLATION"
+          EXISTING=$(gh issue list --repo "$R" --label lu-product-os-guard --state open --json number --jq 'length' 2>/dev/null || echo 0)
+          if [ "${EXISTING:-0}" -eq 0 ]; then
+            gh label create lu-product-os-guard --repo "$R" --color B60205 \
+              --description "main-guard violation (unverified merge)" 2>/dev/null || true
+            gh issue create --repo "$R" --label lu-product-os-guard \
+              --title "main-guard: unverified merge to ${GITHUB_REF_NAME}" \
+              --body "$VIOLATION
+
+          Branch protection is not active on this repo (free-plan detection mode), so this merge was not blocked. Review the commit, revert if it should not have landed, then close this issue." || true
+          else
+            echo "An open main-guard issue already exists — not filing another."
+          fi
+          exit 1
 
   # Comments don't re-trigger pull_request workflows, so without this job a
   # full-tier PR born red on G3 stays red even after the verifier posts

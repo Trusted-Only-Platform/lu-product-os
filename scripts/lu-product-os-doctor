@@ -156,7 +156,11 @@ EOF
     if [ -n "$RULES" ] && [ "$RULES" -gt 0 ] || [ -n "$PROT" ]; then
       note "branch rules/protection active on ${DEFAULT_BRANCH}"
     elif $QUICK; then
-      fail "no branch protection on ${DEFAULT_BRANCH} — nothing enforces the gates"
+      if [ -f "$CALLER" ]; then
+        warn "no branch protection on ${DEFAULT_BRANCH} — free-plan DETECTION MODE: merges are not blocked; main-guard (CI) alerts on unverified merges after the fact"
+      else
+        fail "no branch protection AND no CI caller on ${DEFAULT_BRANCH} — gates are neither enforced nor detected"
+      fi
     else
       if gh api -X PUT "repos/${NWO}/branches/${DEFAULT_BRANCH}/protection" \
           --input - >/dev/null 2>&1 <<'JSON'
@@ -172,8 +176,31 @@ JSON
       then
         fixed "branch protection set on ${DEFAULT_BRANCH} (PR required; checks: verify, pr-check; applies to admins)"
       else
-        fail "could not set branch protection (private repo on free plan, or insufficient permissions). Options: upgrade plan, make repo public, or configure an org ruleset."
+        if [ -f "$CALLER" ]; then
+          warn "could not set branch protection (private repo on free plan?) — running in DETECTION MODE: main-guard (CI) alerts on unverified merges but cannot block them. To hard-enforce: upgrade plan, make repo public, or configure an org ruleset."
+        else
+          fail "could not set branch protection and no CI caller present — nothing enforces OR detects. Re-run doctor (non-quick) to scaffold CI first."
+        fi
       fi
+    fi
+  fi
+
+  # ---------- 6b. Codebase docs freshness (stamp check) ----------
+  # Documentor Update stamps the code commit it regenerated against. Comparing
+  # that stamp to the latest CODE commit (docs/plan/md excluded) makes doc
+  # staleness detectable in one line — so builds don't need a pre-build
+  # Validate pass, and a skipped regeneration can never be silent.
+  DOCS_DIR=0-documentation-codebase
+  STAMP_FILE="$DOCS_DIR/.docs-fresh-sha"
+  if [ -d "$DOCS_DIR" ]; then
+    LATEST_CODE=$(git log -1 --format=%H -- . ":(exclude)$DOCS_DIR" ':(exclude)0-plan' ':(exclude)0-wip' ':(exclude)*.md' 2>/dev/null || true)
+    STAMP=$(head -1 "$STAMP_FILE" 2>/dev/null || true)
+    if [ -z "$STAMP" ]; then
+      warn "codebase docs have no freshness stamp ($STAMP_FILE) — run Documentor Update once to create it; until then freshness is unknown"
+    elif [ -n "$LATEST_CODE" ] && [ "$STAMP" != "$LATEST_CODE" ]; then
+      warn "codebase docs STALE — stamp ${STAMP:0:7} != latest code commit ${LATEST_CODE:0:7}. Run Documentor Validate/Update before building."
+    else
+      note "codebase docs fresh (stamp ${STAMP:0:7} matches latest code commit)"
     fi
   fi
 

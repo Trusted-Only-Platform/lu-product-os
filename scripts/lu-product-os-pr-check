@@ -8,17 +8,26 @@
 #                    unless Lu explicitly waived it in the PR body.
 # Also warns (never fails) if branch protection can't be confirmed.
 #
-# Tier mechanics (v3.1):
+# Tier mechanics (v3.2):
 #   - Size counts EXCLUDE tests, lockfiles, snapshots, and docs — a well-tested
 #     change should not escalate for being diligent. Raw totals still reported.
 #   - Sensitive paths split into two classes:
 #       CRITICAL (migrations/auth/payments/webhooks/schema + repo extensions)
 #         -> G3 depth: full (independent tests + review)
-#       INFRA (Dockerfile/docker-compose/.github) and dependency manifests
+#       INFRA (Dockerfile/docker-compose/.github) and dependency changes
 #         -> G3 depth: review-only (criteria + diff review + verdict; no tests)
-#     Size-triggered escalations: counted LINES > 150 -> depth full (big logic
-#     changes earn independent tests). Counted FILES > 5 alone -> review-only
-#     (many-files-few-lines changes are mechanical sweeps; review suffices).
+#   - Size-triggered escalation: counted LINES > 300 -> depth full (big logic
+#     changes earn independent tests).
+#   v3.2 changes:
+#   - Critical-path patterns are segment-anchored: "auth" no longer matches
+#     AuthorCard.tsx; "session" no longer matches SessionList.tsx. Extend
+#     per-repo domain terms via .github/lu-product-os-sensitive-paths.
+#   - Dependency escalation now requires a LOCKFILE change. Editing a script
+#     in package.json is not a dependency change.
+#   - File-count-only escalation removed (mechanical sweeps were escalating
+#     for no added protection). Counted files still reported.
+#   - Line threshold raised 150 -> 300 (agent-built features with criteria
+#     and builder tests routinely exceed 150 without added risk).
 #
 # Runs inside GitHub Actions (see lu-product-os-ci.yml). Requires: gh, jq.
 # Env: GH_TOKEN, PR_NUMBER, BASE_REF, GITHUB_REPOSITORY.
@@ -45,15 +54,18 @@ FILE_COUNT=$(jq -r '.files | length' <<<"$PR_JSON")
 CHANGED_LINES=$((ADDITIONS + DELETIONS))
 
 # ---------- Tier computation (mechanical — agents can't argue with it) ----------
-MAX_LINES=150
-MAX_FILES=5
+MAX_LINES=300
 
 # Critical paths: being wrong here is expensive and quiet. Full verification.
-# A repo can extend this class with .github/lu-product-os-sensitive-paths (one regex per line).
-CRITICAL_REGEX='(migrations?/|auth|login|session|password|payment|billing|stripe|webhook|database/schema)'
+# Patterns are anchored to path-segment boundaries so substrings don't false-
+# positive (AuthorCard.tsx, SessionList.tsx). Domain terms that ARE critical in
+# this repo go in .github/lu-product-os-sensitive-paths (one regex per line).
+CRITICAL_REGEX='(^|/|[-_.])(migrations?|auth|login|sessions?|passwords?|payments?|billing|stripe|webhooks?)([-_./]|$)|database/schema'
 # Infra plumbing: being wrong here fails loudly at deploy/CI. Review-only verification.
 INFRA_REGEX='(\.github/|Dockerfile|docker-compose)'
-DEP_REGEX='(package\.json|package-lock\.json|bun\.lock|composer\.json|composer\.lock|requirements\.txt|Gemfile|go\.mod)$'
+# Dependency escalation keys on LOCKFILES: a real dependency change always
+# touches one; a package.json script edit does not.
+DEP_REGEX='(^|/)(package-lock\.json|bun\.lockb?|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Gemfile\.lock|go\.sum|requirements\.txt)$'
 UI_REGEX='(\.(tsx|jsx|vue|svelte|css|scss)$|^(app|src/app|components|src/components|pages|src/pages)/)'
 # Excluded from SIZE counts only (still scanned for critical/infra/dep matches):
 EXCLUDE_COUNT_REGEX='(\.(test|spec)\.[A-Za-z]+$|__tests__/|(^|/)tests?/|(^|/)e2e/|\.snap$|(^|/)(package-lock\.json|bun\.lockb?|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Gemfile\.lock|go\.sum)$|\.md$|^0-(plan|documentation-codebase|wip)/|(^|/)docs/)'
@@ -80,17 +92,13 @@ if [ "$COUNTED_LINES" -gt "$MAX_LINES" ]; then
   TIER="full"; G3_DEPTH="full"
   TIER_REASONS+=("diff ${COUNTED_LINES} counted lines > ${MAX_LINES} (raw: ${CHANGED_LINES})")
 fi
-if [ "$COUNTED_FILES" -gt "$MAX_FILES" ]; then
-  TIER="full"; : "${G3_DEPTH:=review-only}"
-  TIER_REASONS+=("${COUNTED_FILES} counted files > ${MAX_FILES} (raw: ${FILE_COUNT})")
-fi
 if INFRA=$(grep -E -i "$INFRA_REGEX" <<<"$FILES" | head -5) && [ -n "$INFRA" ]; then
   TIER="full"; : "${G3_DEPTH:=review-only}"
   TIER_REASONS+=("infra paths: $(tr '\n' ' ' <<<"$INFRA")")
 fi
 if DEPS=$(grep -E "$DEP_REGEX" <<<"$FILES" | head -3) && [ -n "$DEPS" ]; then
   TIER="full"; : "${G3_DEPTH:=review-only}"
-  TIER_REASONS+=("dependency changes: $(tr '\n' ' ' <<<"$DEPS")")
+  TIER_REASONS+=("dependency changes (lockfile): $(tr '\n' ' ' <<<"$DEPS")")
 fi
 
 # ---------- G2: acceptance criteria present ----------

@@ -8,6 +8,18 @@
 #                    unless Lu explicitly waived it in the PR body.
 # Also warns (never fails) if branch protection can't be confirmed.
 #
+# Tier mechanics (v3.1):
+#   - Size counts EXCLUDE tests, lockfiles, snapshots, and docs — a well-tested
+#     change should not escalate for being diligent. Raw totals still reported.
+#   - Sensitive paths split into two classes:
+#       CRITICAL (migrations/auth/payments/webhooks/schema + repo extensions)
+#         -> G3 depth: full (independent tests + review)
+#       INFRA (Dockerfile/docker-compose/.github) and dependency manifests
+#         -> G3 depth: review-only (criteria + diff review + verdict; no tests)
+#     Size-triggered escalations: counted LINES > 150 -> depth full (big logic
+#     changes earn independent tests). Counted FILES > 5 alone -> review-only
+#     (many-files-few-lines changes are mechanical sweeps; review suffices).
+#
 # Runs inside GitHub Actions (see lu-product-os-ci.yml). Requires: gh, jq.
 # Env: GH_TOKEN, PR_NUMBER, BASE_REF, GITHUB_REPOSITORY.
 
@@ -36,25 +48,49 @@ CHANGED_LINES=$((ADDITIONS + DELETIONS))
 MAX_LINES=150
 MAX_FILES=5
 
-# Defaults; a repo can extend with .github/lu-product-os-sensitive-paths (one regex per line)
-SENSITIVE_REGEX='(migrations?/|auth|login|session|password|payment|billing|stripe|webhook|database/schema|\.github/|Dockerfile|docker-compose)'
+# Critical paths: being wrong here is expensive and quiet. Full verification.
+# A repo can extend this class with .github/lu-product-os-sensitive-paths (one regex per line).
+CRITICAL_REGEX='(migrations?/|auth|login|session|password|payment|billing|stripe|webhook|database/schema)'
+# Infra plumbing: being wrong here fails loudly at deploy/CI. Review-only verification.
+INFRA_REGEX='(\.github/|Dockerfile|docker-compose)'
 DEP_REGEX='(package\.json|package-lock\.json|bun\.lock|composer\.json|composer\.lock|requirements\.txt|Gemfile|go\.mod)$'
 UI_REGEX='(\.(tsx|jsx|vue|svelte|css|scss)$|^(app|src/app|components|src/components|pages|src/pages)/)'
+# Excluded from SIZE counts only (still scanned for critical/infra/dep matches):
+EXCLUDE_COUNT_REGEX='(\.(test|spec)\.[A-Za-z]+$|__tests__/|(^|/)tests?/|(^|/)e2e/|\.snap$|(^|/)(package-lock\.json|bun\.lockb?|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Gemfile\.lock|go\.sum)$|\.md$|^0-(plan|documentation-codebase|wip)/|(^|/)docs/)'
 
 if [ -f .github/lu-product-os-sensitive-paths ]; then
   EXTRA=$(grep -v '^\s*#' .github/lu-product-os-sensitive-paths | grep -v '^\s*$' | paste -sd'|' -)
-  [ -n "$EXTRA" ] && SENSITIVE_REGEX="${SENSITIVE_REGEX}|(${EXTRA})"
+  [ -n "$EXTRA" ] && CRITICAL_REGEX="${CRITICAL_REGEX}|(${EXTRA})"
 fi
 
+COUNTED_LINES=$(jq --arg re "$EXCLUDE_COUNT_REGEX" \
+  '[.files[] | select(.path | test($re) | not) | .additions + .deletions] | add // 0' <<<"$PR_JSON")
+COUNTED_FILES=$(jq --arg re "$EXCLUDE_COUNT_REGEX" \
+  '[.files[] | select(.path | test($re) | not)] | length' <<<"$PR_JSON")
+
 TIER="light"
+G3_DEPTH=""
 TIER_REASONS=()
-if [ "$CHANGED_LINES" -gt "$MAX_LINES" ]; then TIER="full"; TIER_REASONS+=("diff ${CHANGED_LINES} lines > ${MAX_LINES}"); fi
-if [ "$FILE_COUNT" -gt "$MAX_FILES" ]; then TIER="full"; TIER_REASONS+=("${FILE_COUNT} files > ${MAX_FILES}"); fi
-if SENS=$(grep -E -i "$SENSITIVE_REGEX" <<<"$FILES" | head -5) && [ -n "$SENS" ]; then
-  TIER="full"; TIER_REASONS+=("sensitive paths: $(tr '\n' ' ' <<<"$SENS")")
+
+if CRIT=$(grep -E -i "$CRITICAL_REGEX" <<<"$FILES" | head -5) && [ -n "$CRIT" ]; then
+  TIER="full"; G3_DEPTH="full"
+  TIER_REASONS+=("critical paths: $(tr '\n' ' ' <<<"$CRIT")")
+fi
+if [ "$COUNTED_LINES" -gt "$MAX_LINES" ]; then
+  TIER="full"; G3_DEPTH="full"
+  TIER_REASONS+=("diff ${COUNTED_LINES} counted lines > ${MAX_LINES} (raw: ${CHANGED_LINES})")
+fi
+if [ "$COUNTED_FILES" -gt "$MAX_FILES" ]; then
+  TIER="full"; : "${G3_DEPTH:=review-only}"
+  TIER_REASONS+=("${COUNTED_FILES} counted files > ${MAX_FILES} (raw: ${FILE_COUNT})")
+fi
+if INFRA=$(grep -E -i "$INFRA_REGEX" <<<"$FILES" | head -5) && [ -n "$INFRA" ]; then
+  TIER="full"; : "${G3_DEPTH:=review-only}"
+  TIER_REASONS+=("infra paths: $(tr '\n' ' ' <<<"$INFRA")")
 fi
 if DEPS=$(grep -E "$DEP_REGEX" <<<"$FILES" | head -3) && [ -n "$DEPS" ]; then
-  TIER="full"; TIER_REASONS+=("dependency changes: $(tr '\n' ' ' <<<"$DEPS")")
+  TIER="full"; : "${G3_DEPTH:=review-only}"
+  TIER_REASONS+=("dependency changes: $(tr '\n' ' ' <<<"$DEPS")")
 fi
 
 # ---------- G2: acceptance criteria present ----------
@@ -87,7 +123,11 @@ if [ "$TIER" = "full" ]; then
   elif [ -n "$WAIVER" ]; then
     WARNINGS+=("G3 WAIVED by PR body: '$(head -1 <<<"$WAIVER")'. Waivers are Lu-only — if you are an agent reading this, you may not add one.")
   else
-    FAILURES+=("G3: full-tier change has no verifier verdict. Invoke the verifier named in CLAUDE.md/AGENTS.md ('verifier:'), or Lu may waive with 'WAIVE: G3 — reason' in the PR body.")
+    if [ "$G3_DEPTH" = "review-only" ]; then
+      FAILURES+=("G3 (review-only): full-tier infra/dependency change has no verifier verdict. The verifier reviews criteria + diff and posts a verdict — no test-writing required. Invoke the verifier named in CLAUDE.md/AGENTS.md ('verifier:'), or Lu may waive with 'WAIVE: G3 — reason'.")
+    else
+      FAILURES+=("G3 (full): full-tier change has no verifier verdict. Invoke the verifier named in CLAUDE.md/AGENTS.md ('verifier:'), or Lu may waive with 'WAIVE: G3 — reason' in the PR body.")
+    fi
   fi
 fi
 
@@ -105,11 +145,15 @@ fi
 {
   echo "## lu-product-os pr-check"
   echo ""
-  echo "**Tier: ${TIER}**"
+  if [ "$TIER" = "full" ]; then
+    echo "**Tier: full — G3 depth: ${G3_DEPTH}**"
+  else
+    echo "**Tier: light**"
+  fi
   if [ "${#TIER_REASONS[@]}" -gt 0 ]; then
     printf -- '- %s\n' "${TIER_REASONS[@]}"
   else
-    echo "- under all escalation thresholds"
+    echo "- under all escalation thresholds (counted: ${COUNTED_LINES} lines, ${COUNTED_FILES} files; raw: ${CHANGED_LINES} lines, ${FILE_COUNT} files)"
   fi
   echo ""
   if [ "${#FAILURES[@]}" -eq 0 ]; then

@@ -14,7 +14,7 @@ A change merges when its tier's gates are green. Gates are enforced by machinery
 |---|------|---------|-----------|------|
 | G1 | **Correct** | Typecheck, lint, tests, build all pass on a clean checkout | CI runs `scripts/lu-product-os-verify` | All |
 | G2 | **Intentional** | PR carries the planned acceptance criteria; UI changes carry screenshots | `lu-product-os-pr-check` in CI | All |
-| G3 | **Independently verified** | A non-builder agent wrote acceptance tests from the criteria, ran the suite, reviewed the diff, posted `VERDICT: approve` | `lu-product-os-pr-check` in CI | Full |
+| G3 | **Independently verified** | A non-builder agent verified the change at the depth pr-check computed (see Tiers) and posted `VERDICT: approve` | `lu-product-os-pr-check` in CI | Full |
 | G4 | **Accepted** | Lu walked the preview deploy against the criteria | Only Lu can press merge (branch protection) | Full |
 | G5 | **Hygienic** | Docs regenerated, ticket linked | Automated post-merge | All |
 
@@ -25,7 +25,12 @@ Rigor scales with blast radius. The tier is **computed mechanically** by `lu-pro
 - **Light** (default): G1 + G2 + G5. Build → PR → CI green → merge.
 - **Full**: adds G3 (independent verifier) + G4 (Lu's preview walkthrough), and a feature flag for user-visible changes on production-profile projects.
 
-**Escalation to Full when ANY of:** diff > 150 changed lines or > 5 files · touches migrations, auth, payments, or public API contract paths · adds or changes a dependency · the project CLAUDE.md marks the touched area as sensitive.
+**Escalation to Full when ANY of:** counted diff > 150 lines or > 5 files (counts **exclude tests, lockfiles, snapshots, and docs** — diligence must not trigger escalation) · touches **critical paths** (migrations, auth, payments, webhooks, database schema, or paths the repo marks sensitive) · touches **infra paths** (Dockerfile, docker-compose, `.github/`) · adds or changes a dependency.
+
+**G3 depth — pr-check computes it and posts it in the check summary:**
+
+- `G3 depth: full` — critical-path or counted-line escalations. The verifier writes independent acceptance tests from the criteria, runs only those tests, reviews the diff, posts a verdict.
+- `G3 depth: review-only` — infra, dependency, or file-count-only escalations. The verifier reviews the criteria and diff hunks and posts a verdict. No test-writing: infra mistakes fail loudly at deploy, and many-files-few-lines changes are mechanical sweeps — independent tests add no protection in either case.
 
 **Waivers:** only Lu can waive a gate, explicitly, in the PR (`WAIVE: G3 — <reason>`). Agents never waive gates.
 
@@ -46,24 +51,29 @@ Declared in the project's CLAUDE.md/AGENTS.md (`profile: prototype | standard | 
 2. Read `0-plan/0-lessons.md` if present — apply its patterns.
 3. Run `lu-product-os-doctor --quick` if available and state the machinery banner (`full / partial / none — prompt mode`). If machinery is partial or absent, say so to Lu before proceeding; missing machinery means gates fall back to being your obligations.
 4. Know your scope: a phase file (`0-plan/phases/`), a ticket brief, or a written scope statement. **Never edit code without a written scope.** If your scope came from a planning conversation, state it in the PR later.
+5. Confirm your validation targets are reachable **before** choosing a validation path: local dev server starts, staging (if used) serves the right branch, auth-gated screens are reachable with available credentials. A validation plan that can't reach its target is a dead end discovered late.
+
+### Re-entry (after compaction or interruption)
+If you are resuming mid-build — after context compaction, a crashed session, or any gap where your memory of the work may be stale — reconcile against reality before acting: run `git log --oneline -15` and `git status`; compare commits against the task table or scope statement to see which tasks are already done; confirm the branch and whether a PR exists; restate the remaining scope in one or two lines, then continue. Never re-do work that commits prove is complete. **The repo is the truth; your memory is the hypothesis.**
 
 ### Build
-5. **Branch** from the default branch: `phase-N/name` or `direct/short-description`. Never commit to main. **Push the branch immediately.**
-6. **Build task by task.** One commit per completed task, Conventional Commits format (`feat:` / `fix:` / `chore:` / `refactor:` / `test:` / `docs:`). Each commit leaves the code working. **Push after every commit** — CI feedback arrives while you work.
-7. **Write unit tests alongside code** (your own feedback loop). The acceptance criteria from the plan are the definition of done; your tests must exercise them.
-8. **UI changes:** verify rendering yourself (browser tooling), capture screenshots — they go in the PR.
-9. **Multi-repo workspaces:** scope names the affected repo(s); same-named branch + one PR per repo; merge in dependency order (backend first); check the workspace's cross-stack contracts doc before changing any shared surface.
+6. **Branch** from the default branch: `phase-N/name` or `direct/short-description`. Never commit to main. **Push the branch immediately** — the push is your backup. (CI runs once the PR opens, not on every push.)
+7. **Build task by task.** One commit per completed task, Conventional Commits format (`feat:` / `fix:` / `chore:` / `refactor:` / `test:` / `docs:`). Each commit leaves the code working. Push after every commit.
+8. **Write unit tests alongside code** (your own feedback loop). The acceptance criteria from the plan are the definition of done; your tests must exercise them.
+9. **UI changes:** verify rendering yourself (browser tooling), capture screenshots as you complete each task — they double as walkthrough evidence in the PR.
+10. **Multi-repo workspaces:** scope names the affected repo(s); same-named branch + one PR per repo; merge in dependency order (backend first); check the workspace's cross-stack contracts doc before changing any shared surface.
+11. **Lu's local review — default: PAUSE.** When the change is functionally built — before polishing, local gates, E2E ceremony, or the PR — start the local dev environment and pause for Lu's direction check. Messy code is expected; Lu is judging direction and substance, not quality. Iterate on his feedback while changes are cheap; proceed only on his go-ahead. Skip only when Lu has said "skip local review" for this change (note the skip in the PR body). For work with no runnable surface, show the closest observable output (a test run, an API response) instead.
 
 ### Deliver
-10. **Open a PR from the template.** The description must contain: what & why, the acceptance criteria (copied from the plan), screenshots for UI changes, deviations from plan, ticket reference (`fixes <ticket>`). The PR *is* the deliverable and the record — there is no separate report.
-11. **Full tier: request independent verification.** Read `verifier:` from CLAUDE.md/AGENTS.md and invoke it (MCP call or PR trigger comment such as `@codex review`), pointing it at the Verification Brief in the PR. The verifier writes acceptance tests from the criteria (without reading the builder's tests first), commits them as `test:` commits, runs the full suite, reviews the diff, and posts `VERDICT: approve` or `VERDICT: request-changes` with findings.
-12. **Fix until green.** Red CI or a request-changes verdict names what's missing — address it, push, let checks re-run. Do not ask Lu to override machinery.
-13. **Stop.** Merging is Lu's action (squash merge). Do not merge, do not nag. If everything is green, say so once.
+12. **Open a PR from the template.** The description must contain: what & why, the acceptance criteria (copied from the plan), screenshots for UI changes, deviations from plan, ticket reference (`fixes <ticket>`). The PR *is* the deliverable and the record — there is no separate report.
+13. **Full tier: request independent verification — and run it in parallel with Lu's preview walk.** Read `verifier:` from CLAUDE.md/AGENTS.md and invoke it (MCP call or PR trigger comment such as `@codex review`), pointing it at the Verification Brief in the PR; the brief tells the verifier its depth (full or review-only) and its scope limits (no full-suite re-runs; re-reviews read only the delta). As soon as the verifier is invoked, if a preview URL exists, tell Lu once: the preview is up, verification runs in parallel, and he can walk it now or wait for full green. The two checks are independent — serializing them wastes the largest block of wall-clock time on full-tier changes.
+14. **Fix until green.** Red CI or a request-changes verdict names what's missing — address it, push, let checks re-run. If Lu already walked the preview, tell him which areas changed so any re-walk is scoped. Do not ask Lu to override machinery.
+15. **Stop.** Merging is Lu's action (squash merge). Do not merge, do not nag. If everything is green, say so once.
 
 ### After merge (automation + light touches)
-14. Docs regenerate on schedule (not your job mid-build). If you changed business rules or domain concepts, update the product-intent docs in the same PR.
-15. Production promotes happen by tagged release (`vX.Y.Z`), decided by Lu. Risky changes ship dark behind a feature flag and ramp.
-16. Add to `0-plan/0-lessons.md` only if something genuinely changed how future work should be done.
+16. Docs regenerate on schedule (not your job mid-build). If you changed business rules or domain concepts, update the product-intent docs in the same PR.
+17. Production promotes happen by tagged release (`vX.Y.Z`), decided by Lu. Risky changes ship dark behind a feature flag and ramp.
+18. Add to `0-plan/0-lessons.md` only if something genuinely changed how future work should be done.
 
 ---
 
@@ -76,6 +86,7 @@ Declared in the project's CLAUDE.md/AGENTS.md (`profile: prototype | standard | 
 ## Documentation Rules
 
 - **Document only what code cannot say** (business rules, domain vocabulary, decisions and why). Everything code can say (schemas, API surfaces, env vars, module maps) lives in *generated* docs — regenerate, never hand-reconcile.
+- **Never hardcode live infrastructure facts** (hosts, environment URLs, service lists) in prose docs — derive them at use-time (CLI, env vars) or verify them via doctor. If a fact can be derived, prose may name the command, never the value.
 - History = git log + merged PRs. No manual change logs.
 - The backlog is Linear. Tickets are written as self-contained agent briefs: context, steps, acceptance criteria, cautions.
 
@@ -85,4 +96,4 @@ Declared in the project's CLAUDE.md/AGENTS.md (`profile: prototype | standard | 
 2. **Builders self-confirm** → verification is independent.
 3. **Prompts don't enforce** → machinery does; if machinery is absent, announce it.
 4. **Every artifact rots** → it must earn its existence or be generated.
-5. **Lu's attention is the scarce resource** → he decides what to build, what "right" means, and whether to accept; everything else is yours.
+5. **Lu's attention is the scarce resource** → he decides what to build, what "right" means, and whether to accept; everything else is yours. His four touchpoints: approve the plan, review the early local build, walk the preview, press merge.

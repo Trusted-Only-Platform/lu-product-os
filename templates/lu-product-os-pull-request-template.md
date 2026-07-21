@@ -27,11 +27,29 @@ Ticket: <!-- e.g. fixes TRU-42, or "direct change — scope stated below" -->
 
 ## Verification Brief <!-- for the independent verifier (full tier) -->
 
-**You are the independent verifier.** Everything you need is in this PR.
+**You are the independent verifier.** Everything you need is in this PR — work from the
+criteria above and the diff. Do not explore the repo beyond the diff and the files it touches.
 
-1. **Without reading the existing test files first**, write acceptance tests covering each criterion above, plus edge and error cases. Commit them to this branch as `test:` commits.
-2. Run the full suite: `./scripts/lu-product-os-verify`
-3. Review the diff: correctness, unnecessary abstraction, dead code, compliance with the project's rules docs.
-4. **Constraints:** modify only test files; report source problems as PR comments, do not fix them yourself.
+**First, read your depth from the pr-check summary on this PR: `G3 depth: full` or `G3 depth: review-only`.**
+
+**If review-only** (infra/dependency escalation — Dockerfiles, workflows, dependency bumps):
+read the acceptance criteria, review the diff hunks (correctness, security implications of the
+infra or dependency change, compliance with the project's rules docs), and post your verdict.
+Write no tests. Run nothing — CI has already proven the suite green.
+
+**If full:**
+
+1. **Without reading the existing test files first**, write acceptance tests covering each
+   criterion above, plus the edge and error cases that matter. Commit them to this branch
+   as `test:` commits.
+2. Run **only the tests you wrote**. Do not re-run the full suite — CI has already proven it
+   green (gate G1), and CI will re-run everything including your tests after you push.
+3. Review the diff hunks: correctness, unnecessary abstraction, dead code, compliance with
+   the project's rules docs.
+4. **Constraints:** modify only test files; report source problems as PR comments, do not
+   fix them yourself.
 5. Post your verdict as a PR comment, first line exactly one of:
    `VERDICT: approve` or `VERDICT: request-changes` — followed by your findings.
+
+**Re-reviews:** after a request-changes round, read only the commits pushed since your last
+verdict and check them against your findings — do not re-review the whole PR.

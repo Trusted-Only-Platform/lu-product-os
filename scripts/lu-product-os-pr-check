@@ -101,16 +101,34 @@ if $IS_PROMOTION; then
       continue
     fi
     case "$SEEN" in *" $N "*) continue;; esac; SEEN="${SEEN}${N} "
-    # `statusCheckRollup` surfaces check runs, so this needs `checks: read`.
-    # Distinguish "could not read" from "read it, and it was red": defaulting an
-    # unreadable rollup to 1 reported every constituent as having failing checks
-    # — a false accusation that reads exactly like a true one, and cost an
-    # afternoon to trace once already.
-    ROLLUP=$(gh pr view "$N" --repo "$REPO" --json statusCheckRollup 2>/dev/null) || {
-      FAILURES+=("Promotion: could not read the check rollup for #$N (missing 'checks: read' permission, or a GitHub API error). Refusing to guess whether it was green.")
+    # Read the constituent's checks over REST, not `gh pr view --json
+    # statusCheckRollup`. That GraphQL field kept failing even once the job had
+    # `checks: read` — the scope GitHub documents for check runs — and a gate
+    # cannot depend on a call whose requirements we are guessing at. The REST
+    # "list check runs for a git ref" endpoint documents exactly `checks: read`
+    # and works with it.
+    #
+    # Error text is captured and reported rather than swallowed. Three separate
+    # defects in this one code path were invisible because a failed call
+    # returned something that read like an answer.
+    PR_JSON=$(gh api "repos/${REPO}/pulls/${N}" 2>&1) || {
+      FAILURES+=("Promotion: could not read PR #$N — $(head -1 <<<"$PR_JSON")")
       continue
     }
-    FAILS=$(jq '[.statusCheckRollup[]? | select((.conclusion // .state // "") | test("FAILURE|CANCELLED|TIMED_OUT|ERROR"; "i"))] | length' <<<"$ROLLUP")
+    HEAD_SHA=$(jq -r '.head.sha' <<<"$PR_JSON")
+    CHECKS=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" --paginate 2>&1) || {
+      FAILURES+=("Promotion: could not read check runs for #$N — $(head -1 <<<"$CHECKS")")
+      continue
+    }
+    # --paginate concatenates JSON objects, so slurp before flattening.
+    FAILS=$(jq -s '[.[].check_runs[]? | select((.conclusion // "") | test("failure|cancelled|timed_out|action_required|stale"; "i"))] | length' <<<"$CHECKS")
+    # Legacy commit statuses too, but only when some exist: the combined-status
+    # endpoint reports "pending" for a commit that simply has none.
+    STATUS_JSON=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/status" 2>/dev/null || echo '{}')
+    if [ "$(jq -r '.statuses | length // 0' <<<"$STATUS_JSON")" -gt 0 ] \
+       && jq -e -r '.state | test("failure|error")' <<<"$STATUS_JSON" >/dev/null 2>&1; then
+      FAILS=$((FAILS + 1))
+    fi
     [ "${FAILS:-0}" -gt 0 ] && BAD_PRS+=("#$N")
   done
   [ "${#BAD_PRS[@]}" -gt 0 ] && \

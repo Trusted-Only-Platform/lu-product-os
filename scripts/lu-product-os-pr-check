@@ -79,8 +79,20 @@ if $IS_PROMOTION; then
   SHAS=$(gh api "repos/${REPO}/pulls/${PR}/commits" --paginate --jq '.[].sha')
   for SHA in $SHAS; do
     # First associated PR that is not this promotion PR itself.
-    N=$(gh api "repos/${REPO}/commits/${SHA}/pulls" \
-      --jq --arg pr "$PR" '[.[] | select((.number|tostring) != $pr)][0].number // empty' 2>/dev/null || true)
+    #
+    # `gh api --jq` takes ONLY the filter expression; --arg is a jq flag and gh
+    # rejects it ("accepts 1 arg(s), received 4"). Piping real JSON into real jq
+    # keeps --arg available and keeps the PR number out of the expression.
+    #
+    # An API failure must NOT read as "no associated PR". It used to: the error
+    # was swallowed, N came back empty, and every commit — merge commits of
+    # green PRs included — was reported as an unreviewed direct push, so no
+    # promotion PR could pass this gate at all.
+    PULLS_JSON=$(gh api "repos/${REPO}/commits/${SHA}/pulls" 2>/dev/null) || {
+      FAILURES+=("Promotion: could not read the PRs associated with ${SHA:0:7} (GitHub API error). Refusing to guess whether it was reviewed.")
+      continue
+    }
+    N=$(jq -r --arg pr "$PR" '[.[] | select((.number|tostring) != $pr)][0].number // empty' <<<"$PULLS_JSON")
     if [ -z "$N" ]; then
       # Direct commit — exempt only if docs-only (doc regeneration, plans, md).
       NONDOC=$(gh api "repos/${REPO}/commits/${SHA}" --jq '[.files[].filename] | join("\n")' 2>/dev/null \

@@ -27,6 +27,24 @@ fail()   { REPORT+=("FAIL   $1"); STATUS_WORST=2; }
 command -v gh >/dev/null || { echo "gh CLI is required (https://cli.github.com)"; exit 1; }
 command -v jq >/dev/null || { echo "jq is required"; exit 1; }
 
+# ---------- 0b. Self-install on PATH ----------
+# Non-interactive shells don't source rc files, so "the very first protocol
+# step" (running this script) must resolve without PATH setup. A symlink in a
+# standard bin dir fixes that for interactive AND non-interactive shells.
+if ! $QUICK && ! command -v lu-product-os-doctor >/dev/null 2>&1; then
+  SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  for BIN in /usr/local/bin "$HOME/.local/bin"; do
+    mkdir -p "$BIN" 2>/dev/null || true
+    [ -d "$BIN" ] && [ -w "$BIN" ] || continue
+    if ln -sf "$SELF" "$BIN/lu-product-os-doctor" 2>/dev/null; then
+      fixed "installed on PATH: $BIN/lu-product-os-doctor -> $SELF"
+      break
+    fi
+  done
+  command -v lu-product-os-doctor >/dev/null 2>&1 \
+    || warn "not on PATH (no writable /usr/local/bin or ~/.local/bin) — call it by absolute path in non-interactive shells"
+fi
+
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
   fail "Not a git repository. Run 'git init' first (or cd into the project repo)."
   STATUS=none
@@ -182,6 +200,25 @@ JSON
           fail "could not set branch protection and no CI caller present — nothing enforces OR detects. Re-run doctor (non-quick) to scaffold CI first."
         fi
       fi
+    fi
+  fi
+
+  # ---------- 6aa. Gate credibility — no tolerated red ----------
+  # A check that is red on every run makes every merge button amber and trains
+  # everyone to ignore red — the most corrosive state an outcome-gated process
+  # can be in. Quick mode looks at the default-branch tip (one API call); full
+  # mode also catches case-duplicate workflow names, which break
+  # `gh run rerun --workflow <name>` and cause stale check reports.
+  if [ -n "$NWO" ]; then
+    RED=$(gh api "repos/${NWO}/commits/${DEFAULT_BRANCH}/check-runs" \
+      --jq '[.check_runs[] | select(.conclusion=="failure") | .name] | unique | join(", ")' 2>/dev/null || true)
+    if [ -n "$RED" ]; then
+      warn "red check(s) on ${DEFAULT_BRANCH} tip: [${RED}] — if chronic, every merge shows amber and gates lose meaning. Fix the check or delete it; never tolerate standing red. (This also blocks/complicates merges: GitHub reports UNSTABLE.)"
+    fi
+    if ! $QUICK; then
+      DUPWF=$(gh api "repos/${NWO}/actions/workflows" \
+        --jq '[.workflows[].name | ascii_downcase] | group_by(.) | map(select(length>1) | .[0]) | join(", ")' 2>/dev/null || true)
+      [ -n "$DUPWF" ] && warn "workflow names differing only in case: [${DUPWF}] — 'gh run rerun --workflow <name>' matches nothing or the wrong one; rename or delete one"
     fi
   fi
 

@@ -19,7 +19,7 @@ The central machinery for Lu's product development process. Every project **inhe
 | # | Gate | Checked by | Tier |
 |---|------|-----------|------|
 | G1 | Correct — typecheck/lint/test/build pass | CI runs `scripts/lu-product-os-verify` | all |
-| G2 | Intentional — acceptance criteria in PR; screenshots for UI | `pr-check` | all |
+| G2 | Intentional — acceptance criteria in PR (blocking); screenshots for UI (advisory warning) | `pr-check` | all |
 | G3 | Independently verified — non-builder agent posts `VERDICT: approve` | `pr-check` | full |
 | G4 | Accepted — Lu walks the preview, Lu presses merge | branch protection | full |
 | G5 | Hygienic — docs regenerated, ticket linked | post-merge automation | all |
@@ -38,6 +38,16 @@ bash <(gh api repos/OWNER/lu-product-os/contents/scripts/lu-product-os-doctor --
 ```
 
 Doctor scaffolds/repairs everything it safely can, then tells you what it couldn't. Finish with a **canary PR**: open a trivial PR and confirm the checks run *and block*. Machinery isn't trusted until it has proven itself once.
+
+### Adopting an EXISTING repo (legacy baseline — settle each of these exactly once)
+
+A repo that predates the OS arrives with debt that turns gates into noise. Before real work:
+
+1. **No tolerated red.** Fix or delete any CI job that is red on the default branch (doctor now flags these). A chronically red check makes every merge amber and trains everyone to ignore red.
+2. **Formatting baseline.** One bulk-format commit (Pint/Prettier) + `.git-blame-ignore-revs`, its own PR. Until it lands, keep the formatter out of the blocking verify path.
+3. **Test baseline.** Fix per-test rollback if cheap; otherwise commit the failure baseline and wire the sorted-set comparison into the verify script (pattern in `templates/lu-product-os-verify.template`). Baseline may only shrink.
+4. **Workflow hygiene.** No two workflows differing only in case (doctor flags these).
+5. **Declare the flow** (`flow:` line in CLAUDE.md/AGENTS.md) if the repo promotes through an integration branch like `staging`.
 
 Per-project footprint after setup (everything prefixed `lu-product-os-` so you can spot it):
 

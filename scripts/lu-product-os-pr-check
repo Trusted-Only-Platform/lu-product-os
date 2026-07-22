@@ -2,8 +2,11 @@
 # lu-product-os-pr-check — enforces outcome gates G2/G3 on a pull request.
 #
 # Computes the change tier (light/full) mechanically from the diff, then checks:
-#   G2  (all tiers): PR body has a non-empty "Acceptance Criteria" section;
-#                    UI changes carry at least one screenshot/image.
+#   G2  (all tiers): PR body has a non-empty "Acceptance Criteria" section
+#                    (blocking). UI changes should carry a screenshot/image —
+#                    ADVISORY since v3.3: a missing screenshot warns, never
+#                    fails. It caught zero defects and, with an imperfect UI
+#                    detector, a blocking version strands legitimate PRs.
 #   G3  (full tier): an independent verifier posted "VERDICT: approve",
 #                    unless Lu explicitly waived it in the PR body.
 # Also warns (never fails) if branch protection can't be confirmed.
@@ -121,10 +124,10 @@ if [ -z "$CRITERIA" ]; then
   FAILURES+=("G2: PR body has no non-empty '## Acceptance Criteria' section. Copy the criteria from the plan (phase file / ticket) into the PR description.")
 fi
 
-# ---------- G2: screenshots for UI changes ----------
+# ---------- G2: screenshots for UI changes (advisory — warns, never fails) ----------
 if grep -E -q "$UI_REGEX" <<<"$FILES"; then
   if ! grep -E -q '(!\[[^]]*\]\([^)]+\)|user-images\.githubusercontent\.com|github\.com/user-attachments)' <<<"$BODY"; then
-    FAILURES+=("G2: diff touches UI paths but the PR body contains no screenshot/image. Attach browser-verification screenshots.")
+    WARNINGS+=("G2 (advisory): diff touches UI paths but the PR body contains no screenshot/image. Attach browser-verification screenshots of changed screens — or ignore if the UI detector misfired.")
   fi
 fi
 

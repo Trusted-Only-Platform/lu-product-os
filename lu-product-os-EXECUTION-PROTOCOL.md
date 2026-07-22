@@ -14,8 +14,8 @@ A change merges when its tier's gates are green. Gates are enforced by machinery
 
 | # | Gate | Meaning | Checked by | Tier |
 |---|------|---------|-----------|------|
-| G1 | **Correct** | Typecheck, lint, tests, build all pass on a clean checkout | CI runs `scripts/lu-product-os-verify` | All |
-| G2 | **Intentional** | PR carries the planned acceptance criteria; UI changes carry screenshots | `lu-product-os-pr-check` in CI | All |
+| G1 | **Correct** | Typecheck, lint, tests, build all pass on a clean checkout. Legacy repos with a pre-existing failure baseline: G1 = no NEW failures vs a committed, shrink-only baseline compared as sorted sets — encoded in the verify script, never improvised per session | CI runs `scripts/lu-product-os-verify` | All |
+| G2 | **Intentional** | PR carries the planned acceptance criteria (blocking); UI changes carry screenshots (advisory — warns, never blocks) | `lu-product-os-pr-check` in CI | All |
 | G3 | **Independently verified** | A non-builder agent verified the change at the depth pr-check computed (see Tiers) and posted `VERDICT: approve` | `lu-product-os-pr-check` in CI | Full |
 | G4 | **Accepted** | Lu walked the preview deploy against the criteria | Only Lu can press merge (branch protection) | Full |
 | G5 | **Hygienic** | Docs regenerated, ticket linked | Automated post-merge | All |

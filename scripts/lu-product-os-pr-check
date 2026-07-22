@@ -101,9 +101,17 @@ if $IS_PROMOTION; then
       continue
     fi
     case "$SEEN" in *" $N "*) continue;; esac; SEEN="${SEEN}${N} "
-    FAILS=$(gh pr view "$N" --repo "$REPO" --json statusCheckRollup \
-      --jq '[.statusCheckRollup[]? | select((.conclusion // .state // "") | test("FAILURE|CANCELLED|TIMED_OUT|ERROR"; "i"))] | length' 2>/dev/null || echo "")
-    [ "${FAILS:-1}" -gt 0 ] && BAD_PRS+=("#$N")
+    # `statusCheckRollup` surfaces check runs, so this needs `checks: read`.
+    # Distinguish "could not read" from "read it, and it was red": defaulting an
+    # unreadable rollup to 1 reported every constituent as having failing checks
+    # — a false accusation that reads exactly like a true one, and cost an
+    # afternoon to trace once already.
+    ROLLUP=$(gh pr view "$N" --repo "$REPO" --json statusCheckRollup 2>/dev/null) || {
+      FAILURES+=("Promotion: could not read the check rollup for #$N (missing 'checks: read' permission, or a GitHub API error). Refusing to guess whether it was green.")
+      continue
+    }
+    FAILS=$(jq '[.statusCheckRollup[]? | select((.conclusion // .state // "") | test("FAILURE|CANCELLED|TIMED_OUT|ERROR"; "i"))] | length' <<<"$ROLLUP")
+    [ "${FAILS:-0}" -gt 0 ] && BAD_PRS+=("#$N")
   done
   [ "${#BAD_PRS[@]}" -gt 0 ] && \
     FAILURES+=("Promotion: constituent PR(s) with failing checks: ${BAD_PRS[*]}. A promotion is green only when everything it promotes was green.")

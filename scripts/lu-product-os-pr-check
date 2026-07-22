@@ -50,9 +50,70 @@ WARNINGS=()
 
 # ---------- Fetch PR data ----------
 PR_JSON=$(gh pr view "$PR" --repo "$REPO" \
-  --json body,additions,deletions,files,labels,comments,reviews,author)
+  --json body,additions,deletions,files,labels,comments,reviews,author,headRefName)
 
 BODY=$(jq -r '.body // ""' <<<"$PR_JSON")
+HEAD_REF=$(jq -r '.headRefName // ""' <<<"$PR_JSON")
+
+# ---------- Promotion PRs (integration branch -> integration branch) ----------
+# Declared in CLAUDE.md/AGENTS.md as e.g. `flow: feature -> staging -> main`.
+# A promotion PR re-delivers code that already earned its gates on its own
+# PRs, so recomputing tier/G2/G3 on the aggregate diff makes every promotion
+# structurally red — which trains everyone to merge past red. The gate here
+# is instead: every commit in the range came from a PR with no failing
+# checks (docs-only direct commits exempt, same rule as main-guard).
+FLOW=$(grep -hiE '^\s*-?\s*\*{0,2}flow:?\*{0,2}\s*\S' CLAUDE.md AGENTS.md 2>/dev/null | head -1 \
+  | sed -E 's/^[[:space:]*-]*[Ff][Ll][Oo][Ww]:?\**[[:space:]]*//' || true)
+IS_PROMOTION=false
+if [ -n "$FLOW" ] && [ -n "$HEAD_REF" ]; then
+  # Integration branches = every stage in the flow after the first.
+  # Split on '->' only, so branch names containing hyphens survive.
+  INTEG=$(awk -F'->' '{for(i=2;i<=NF;i++){gsub(/[[:space:]]/,"",$i); if($i!="") print $i}}' <<<"$FLOW")
+  if grep -qxF "$HEAD_REF" <<<"$INTEG" && grep -qxF "$BASE" <<<"$INTEG"; then
+    IS_PROMOTION=true
+  fi
+fi
+
+if $IS_PROMOTION; then
+  BAD_PRS=(); ORPHANS=(); SEEN=" "
+  SHAS=$(gh api "repos/${REPO}/pulls/${PR}/commits" --paginate --jq '.[].sha')
+  for SHA in $SHAS; do
+    # First associated PR that is not this promotion PR itself.
+    N=$(gh api "repos/${REPO}/commits/${SHA}/pulls" \
+      --jq --arg pr "$PR" '[.[] | select((.number|tostring) != $pr)][0].number // empty' 2>/dev/null || true)
+    if [ -z "$N" ]; then
+      # Direct commit — exempt only if docs-only (doc regeneration, plans, md).
+      NONDOC=$(gh api "repos/${REPO}/commits/${SHA}" --jq '[.files[].filename] | join("\n")' 2>/dev/null \
+        | grep -vE '^(0-documentation-codebase/|0-plan/|0-wip/|.*\.md$)' || true)
+      [ -n "$NONDOC" ] && ORPHANS+=("${SHA:0:7}")
+      continue
+    fi
+    case "$SEEN" in *" $N "*) continue;; esac; SEEN="${SEEN}${N} "
+    FAILS=$(gh pr view "$N" --repo "$REPO" --json statusCheckRollup \
+      --jq '[.statusCheckRollup[]? | select((.conclusion // .state // "") | test("FAILURE|CANCELLED|TIMED_OUT|ERROR"; "i"))] | length' 2>/dev/null || echo "")
+    [ "${FAILS:-1}" -gt 0 ] && BAD_PRS+=("#$N")
+  done
+  [ "${#BAD_PRS[@]}" -gt 0 ] && \
+    FAILURES+=("Promotion: constituent PR(s) with failing checks: ${BAD_PRS[*]}. A promotion is green only when everything it promotes was green.")
+  [ "${#ORPHANS[@]}" -gt 0 ] && \
+    FAILURES+=("Promotion: non-docs commit(s) with no associated PR (direct push): ${ORPHANS[*]}.")
+  {
+    echo "## lu-product-os pr-check"
+    echo ""
+    echo "**Promotion PR: ${HEAD_REF} → ${BASE}** (flow: ${FLOW})"
+    echo "- tier/G2/G3 are not recomputed — code already earned its gates on its own PRs"
+    echo "- gate: every promoted commit came from a green PR (docs-only commits exempt)"
+    echo ""
+    if [ "${#FAILURES[@]}" -eq 0 ]; then
+      echo "✅ **All constituent PRs green.**"
+    else
+      echo "❌ **Promotion blocked:**"
+      printf -- '- %s\n' "${FAILURES[@]}"
+    fi
+  } >>"$SUMMARY"
+  for f in ${FAILURES[@]+"${FAILURES[@]}"}; do echo "::error::$f"; done
+  exit $([ "${#FAILURES[@]}" -eq 0 ] && echo 0 || echo 1)
+fi
 ADDITIONS=$(jq -r '.additions' <<<"$PR_JSON")
 DELETIONS=$(jq -r '.deletions' <<<"$PR_JSON")
 FILES=$(jq -r '.files[].path' <<<"$PR_JSON")

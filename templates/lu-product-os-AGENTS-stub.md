@@ -9,6 +9,10 @@
 
 profile: standard   <!-- prototype | standard | production -->
 verifier: none      <!-- e.g. codex-mcp, "@codex review" PR comment, none -->
+flow: feature -> main   <!-- branch topology; e.g. feature -> staging -> main.
+                             Branch from (and PR into) the FIRST integration
+                             branch. Promotion PRs (staging -> main) are gated
+                             on constituent-PR greenness, not re-verified. -->
 
 ## Process
 

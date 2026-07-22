@@ -85,6 +85,12 @@ jobs:
       contents: read
       pull-requests: read
       issues: read
+      # The promotion gate reads each constituent PR's statusCheckRollup, which
+      # surfaces check runs and therefore needs `checks: read`. Without it the
+      # query fails and every constituent looks like it has failing checks.
+      # NOTE: a caller's permissions block caps what a reusable workflow can be
+      # granted, so templates/lu-product-os-ci-caller.yml must list this too.
+      checks: read
     steps:
       - uses: actions/checkout@v4
         with:

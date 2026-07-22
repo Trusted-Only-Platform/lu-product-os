@@ -16,5 +16,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      checks: read      # promotion gate reads constituent PRs' check rollups
       issues: write     # main-guard files an alert issue on unverified merges
       actions: write    # retrigger-pr-check re-runs the failed job

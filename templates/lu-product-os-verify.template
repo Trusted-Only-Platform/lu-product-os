@@ -28,4 +28,26 @@ set -euo pipefail
 # ./vendor/bin/pint --test
 # php artisan test
 
+# --- Changed-file detection (the ONLY sanctioned diff-base pattern) ---------
+# CI checks out full history (fetch-depth: 0) and exports BASE_REF = the PR's
+# target branch. Use merge-base; never hardcode a base branch, never --deepen:
+#
+# BASE=$(git merge-base "origin/${BASE_REF:-main}" HEAD)
+# CHANGED=$(git diff --name-only "$BASE"...HEAD -- '*.php')
+#
+# NOTE on formatters (Pint, Prettier) over changed files: this only works on a
+# formatted baseline. If the repo has never been formatted, land ONE bulk
+# format commit + .git-blame-ignore-revs first, and keep the formatter out of
+# the blocking path until that lands — otherwise every functional PR drags in
+# whole-file reformat noise.
+
+# --- Legacy suite baseline (repos with pre-existing failures) ---------------
+# G1 in a legacy repo = NO NEW failures vs a committed baseline. Compare
+# sorted failure SETS, not counts — counts drift when tests lack per-test
+# rollback. The baseline may only shrink; commit shrinkage in the same PR.
+#
+# php artisan test 2>&1 | grep -oE 'FAIL[^ ]* +\S+' | sort -u > /tmp/failures-now   # adapt extraction
+# NEW=$(comm -13 tests/failure-baseline.txt /tmp/failures-now)
+# [ -z "$NEW" ] || { echo "NEW test failures vs baseline:"; echo "$NEW"; exit 1; }
+
 echo "TODO: replace with this project's real gates" && exit 1

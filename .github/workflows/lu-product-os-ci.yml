@@ -28,6 +28,13 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so verify scripts can compute a diff base with
+          # `git merge-base origin/$BASE_REF HEAD` on any branch topology
+          # (feature -> staging -> main included). Shallow clones made that
+          # impossible and pushed projects into --deepen loops that never
+          # terminate when the branch was cut from a different trunk.
+          fetch-depth: 0
 
       # Dependency caching — cuts install time on every CI round trip.
       - name: Setup Node with npm cache
@@ -56,6 +63,12 @@ jobs:
           key: composer-${{ runner.os }}-${{ hashFiles('composer.lock') }}
 
       - name: Run project quality gates
+        env:
+          # The PR's target branch (falls back to the pushed branch on push
+          # events). Verify scripts that diff changed files MUST use
+          # `git merge-base "origin/${BASE_REF:-main}" HEAD` — see the
+          # verify template. Never hardcode a base branch, never --deepen.
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.ref_name }}
         run: |
           CMD="${{ inputs.verify-command }}"
           if [ "$CMD" = "./scripts/lu-product-os-verify" ] && [ ! -x "$CMD" ]; then

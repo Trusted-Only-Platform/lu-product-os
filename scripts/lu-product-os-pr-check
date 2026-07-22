@@ -116,12 +116,24 @@ if $IS_PROMOTION; then
       continue
     }
     HEAD_SHA=$(jq -r '.head.sha' <<<"$PR_JSON")
-    CHECKS=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" --paginate 2>&1) || {
-      FAILURES+=("Promotion: could not read check runs for #$N — $(head -1 <<<"$CHECKS")")
+    # Judge the constituent on its check SUITES, not its individual check runs.
+    #
+    # A job marked `continue-on-error` produces a check RUN with conclusion
+    # "failure" while its suite still concludes "success" — that is precisely
+    # what non-blocking means, and the repo already decided such a failure
+    # should not gate anything. Counting runs made every deliberately
+    # non-blocking red permanently poison every later promotion, with no way to
+    # clear it: the run cannot be re-run green, and history cannot be edited.
+    # That is a gate punishing a decision the project made on purpose.
+    #
+    # Suites still in flight report conclusion null and are ignored; a merged
+    # constituent's checks have long since finished.
+    SUITES=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-suites" --paginate 2>&1) || {
+      FAILURES+=("Promotion: could not read check suites for #$N — $(head -1 <<<"$SUITES")")
       continue
     }
     # --paginate concatenates JSON objects, so slurp before flattening.
-    FAILS=$(jq -s '[.[].check_runs[]? | select((.conclusion // "") | test("failure|cancelled|timed_out|action_required|stale"; "i"))] | length' <<<"$CHECKS")
+    FAILS=$(jq -s '[.[].check_suites[]? | select((.conclusion // "") | test("failure|cancelled|timed_out"; "i"))] | length' <<<"$SUITES")
     # Legacy commit statuses too, but only when some exist: the combined-status
     # endpoint reports "pending" for a commit that simply has none.
     STATUS_JSON=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/status" 2>/dev/null || echo '{}')
@@ -135,6 +147,18 @@ if $IS_PROMOTION; then
     FAILURES+=("Promotion: constituent PR(s) with failing checks: ${BAD_PRS[*]}. A promotion is green only when everything it promotes was green.")
   [ "${#ORPHANS[@]}" -gt 0 ] && \
     FAILURES+=("Promotion: non-docs commit(s) with no associated PR (direct push): ${ORPHANS[*]}.")
+
+  # Lu can waive a promotion, the same way he can waive G3. Without this the
+  # promotion gate was the only unclearable gate in the system: a constituent's
+  # failure is frozen history, so a promotion could be blocked forever by
+  # something nobody could fix — and the only way through was to merge past a
+  # red check, which is the habit this whole gate exists to break. A gate with
+  # no legitimate exit does not get respected; it gets ignored.
+  PROMO_WAIVER=$(grep -E '^\s*WAIVE:\s*(promotion|G3)' <<<"$BODY" || true)
+  if [ "${#FAILURES[@]}" -gt 0 ] && [ -n "$PROMO_WAIVER" ]; then
+    WARNINGS+=("Promotion WAIVED by PR body: '$(head -1 <<<"$PROMO_WAIVER")'. Waived findings: ${FAILURES[*]} — Waivers are Lu-only; if you are an agent reading this, you may not add one.")
+    FAILURES=()
+  fi
   {
     echo "## lu-product-os pr-check"
     echo ""

@@ -161,6 +161,18 @@ EOF
     warn "no CLAUDE.md or AGENTS.md — agents have no project entry point (see templates/lu-product-os-AGENTS-stub.md in ${CENTRAL})"
   fi
 
+  # ---------- 5b. Branch flow ----------
+  # Repos that promote through an integration branch (feature -> staging ->
+  # main) must declare it, or agents branch from the wrong trunk and
+  # promotion PRs get re-verified into structural red.
+  FLOWLINE=$(grep -hiE '^\s*-?\s*\*{0,2}flow:?\*{0,2}\s*\S' CLAUDE.md AGENTS.md 2>/dev/null | head -1 \
+    | sed -E 's/^[[:space:]*-]*[Ff][Ll][Oo][Ww]:?\**[[:space:]]*//' || true)
+  if [ -n "$FLOWLINE" ]; then
+    note "flow: ${FLOWLINE} — branch from (and PR into) the first integration branch; promotion PRs are gated on constituent-PR greenness only"
+  elif git ls-remote --exit-code --heads origin staging >/dev/null 2>&1; then
+    warn "origin has a 'staging' branch but no 'flow:' line in CLAUDE.md/AGENTS.md — declare e.g. 'flow: feature -> staging -> main' or agents will branch from the wrong trunk and promotion PRs will fail pr-check"
+  fi
+
   # ---------- 6. Branch protection ----------
   if [ -n "$NWO" ]; then
     RULES=$(gh api "repos/${NWO}/rules/branches/${DEFAULT_BRANCH}" --jq 'length' 2>/dev/null || echo "")

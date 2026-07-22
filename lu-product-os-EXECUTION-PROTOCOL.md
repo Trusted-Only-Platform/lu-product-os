@@ -36,6 +36,16 @@ Rigor scales with blast radius. The tier is **computed mechanically** by `lu-pro
 
 **Waivers:** only Lu can waive a gate, explicitly, in the PR (`WAIVE: G3 — <reason>`). Agents never waive gates.
 
+## Branch Flow & Promotion PRs
+
+Projects that promote through an integration branch declare it in CLAUDE.md/AGENTS.md next to `profile:` and `verifier:`:
+
+```
+flow: feature -> staging -> main
+```
+
+No `flow:` line means the default single-trunk flow (`feature -> main`). Feature branches are cut from, and PR into, the first integration branch. **Promotion PRs** (integration → integration, e.g. `staging → main`) are not re-verified: the code already earned its gates on its own PRs, so pr-check checks exactly one thing — every promoted commit came from a PR with no failing checks (docs-only direct commits exempt). Green constituents = green promotion; a red promotion names the offending PR.
+
 ## Project Profiles
 
 Declared in the project's CLAUDE.md/AGENTS.md (`profile: prototype | standard | production`):
@@ -59,7 +69,7 @@ Declared in the project's CLAUDE.md/AGENTS.md (`profile: prototype | standard | 
 If you are resuming mid-build — after context compaction, a crashed session, or any gap where your memory of the work may be stale — reconcile against reality before acting: run `git log --oneline -15` and `git status`; compare commits against the task table or scope statement to see which tasks are already done; confirm the branch and whether a PR exists; restate the remaining scope in one or two lines, then continue. Never re-do work that commits prove is complete. **The repo is the truth; your memory is the hypothesis.**
 
 ### Build
-6. **Branch** from the default branch: `phase-N/name` or `direct/short-description`. Never commit to main. **Push the branch immediately** — the push is your backup. (CI runs once the PR opens, not on every push.)
+6. **Branch from the branch your PR will target** — the first integration branch in the project's `flow:` line (`main` when no flow is declared). Name it `phase-N/name` or `direct/short-description`. Never commit to main. **Push the branch immediately** — the push is your backup. (CI runs once the PR opens, not on every push.) Cutting from the wrong trunk (e.g. from `main` when the PR targets `staging`) produces phantom diffs and unresolvable merge bases — it cost a rebase the one time it happened; don't repeat it.
 7. **Build task by task.** One commit per completed task, Conventional Commits format (`feat:` / `fix:` / `chore:` / `refactor:` / `test:` / `docs:`). Each commit leaves the code working. Push after every commit.
 8. **Write unit tests alongside code** (your own feedback loop). The acceptance criteria from the plan are the definition of done; your tests must exercise them. **Local checks are the fast loop, CI is the gate:** while building, run only targeted checks (typecheck + the tests near what you changed). On **light tier**, do not run the full verify script locally — CI runs it once, on a clean checkout, at PR time. On **full tier**, run one clean `./scripts/lu-product-os-verify` before opening the PR, because a red CI discovered mid-verification wastes a verifier round.
 9. **UI changes:** verify rendering in a real browser once per new or changed screen as you build (a screen that was never rendered is not done). Do NOT capture evidence screenshots per task — capture them once, at PR time, for the final state of each changed screen.

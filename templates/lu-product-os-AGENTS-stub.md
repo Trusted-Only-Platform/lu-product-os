@@ -19,7 +19,7 @@ flow: feature -> main   <!-- branch topology; e.g. feature -> staging -> main.
 This project follows the **lu-product-os** protocol: outcome gates, tiers, PR-based
 delivery, independent verification on full-tier changes.
 Read `lu-product-os-EXECUTION-PROTOCOL.md` in the lu-product-os repo before building.
-Run `lu-product-os-doctor --quick` at session start and state the machinery banner.
+Run `lu-product-os-doctor --quick` at build-session start and state the machinery banner (read-only sessions are exempt).
 
 ## Commands
 

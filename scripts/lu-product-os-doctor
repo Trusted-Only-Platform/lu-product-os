@@ -27,6 +27,10 @@ fail()   { REPORT+=("FAIL   $1"); STATUS_WORST=2; }
 command -v gh >/dev/null || { echo "gh CLI is required (https://cli.github.com)"; exit 1; }
 command -v jq >/dev/null || { echo "jq is required"; exit 1; }
 
+# The script must carry its executable bit — README and agents invoke it
+# directly, and a 644 file turns the very first protocol step into a blocker.
+[ -x "${BASH_SOURCE[0]}" ] || warn "doctor script itself is not executable — chmod +x it and commit the bit (git update-index --chmod=+x)"
+
 # ---------- 0b. Self-install on PATH ----------
 # Non-interactive shells don't source rc files, so "the very first protocol
 # step" (running this script) must resolve without PATH setup. A symlink in a
@@ -161,6 +165,65 @@ EOF
     warn "no CLAUDE.md or AGENTS.md — agents have no project entry point (see templates/lu-product-os-AGENTS-stub.md in ${CENTRAL})"
   fi
 
+  # ---------- 5a2. Entry-file parity ----------
+  # CLAUDE.md and AGENTS.md are intentionally two real files (some platforms
+  # don't follow symlinks); the failure mode is silent skew. Byte-equality is
+  # the contract (project-md skill rule).
+  if [ -f CLAUDE.md ] && [ -f AGENTS.md ]; then
+    if cmp -s CLAUDE.md AGENTS.md; then
+      note "CLAUDE.md == AGENTS.md (byte-identical)"
+    else
+      fail "CLAUDE.md and AGENTS.md DIFFER — they must stay byte-identical (project-md skill rule); diff them and reconcile now"
+    fi
+  fi
+
+  # ---------- 5a3. Skill wiring ----------
+  # Required Skills named in the entry file must resolve where agents load
+  # them (~/.claude/skills and ~/.codex/skills). A broken symlink means that
+  # platform silently loses the skill and the agent STOPs mid-task.
+  if [ -d "$HOME/.codex/skills" ]; then
+    BROKEN=""
+    for L in "$HOME/.codex/skills"/*; do
+      [ -L "$L" ] && [ ! -e "$L" ] && BROKEN+="$(basename "$L") "
+    done
+    [ -n "$BROKEN" ] && warn "broken symlink(s) in ~/.codex/skills: [${BROKEN% }] — Codex cannot discover these; re-link them at the canonical (versioned) names"
+  fi
+  ENTRYF=$( { [ -f CLAUDE.md ] && echo CLAUDE.md; } || { [ -f AGENTS.md ] && echo AGENTS.md; } || true )
+  if [ -n "${ENTRYF:-}" ] && grep -q '^## Required Skills' "$ENTRYF" 2>/dev/null; then
+    MISSING_SK=""
+    while IFS= read -r SK; do
+      [ -n "$SK" ] || continue
+      if [ ! -e "$HOME/.claude/skills/$SK" ] && [ ! -e "$HOME/.codex/skills/$SK" ]; then
+        MISSING_SK+="$SK "
+      fi
+    done < <(awk '/^## Required Skills/{f=1;next} /^## /{f=0} f && /^\|/ {split($0,a,"|"); n=a[2]; gsub(/^ +| +$|`/,"",n); if (n!="" && n!="Skill" && n !~ /^-+$/) print n}' "$ENTRYF")
+    if [ -n "$MISSING_SK" ]; then
+      warn "required skill(s) unresolved in ~/.claude/skills and ~/.codex/skills: ${MISSING_SK% }— fix the skill wiring or the entry-file names"
+    else
+      note "required skills all resolve (Claude + Codex skill roots)"
+    fi
+  fi
+
+  # ---------- 5a4. Clone sync state ----------
+  # A stale local clone of a protocol or member repo is guidance drift: the
+  # lessons describe fixes the checkout doesn't have. Quick mode compares
+  # against the last-fetched refs (no network); full mode fetches first.
+  if [ -n "$ORIGIN" ]; then
+    $QUICK || git fetch -q origin "$DEFAULT_BRANCH" 2>/dev/null || true
+    if git rev-parse -q --verify "origin/$DEFAULT_BRANCH" >/dev/null 2>&1 \
+       && git rev-parse -q --verify "$DEFAULT_BRANCH" >/dev/null 2>&1; then
+      BEHIND=$(git rev-list --count "$DEFAULT_BRANCH..origin/$DEFAULT_BRANCH" 2>/dev/null || echo 0)
+      AHEAD=$(git rev-list --count "origin/$DEFAULT_BRANCH..$DEFAULT_BRANCH" 2>/dev/null || echo 0)
+      if [ "${BEHIND:-0}" -gt 0 ]; then
+        warn "local ${DEFAULT_BRANCH} is ${BEHIND} commit(s) behind origin/${DEFAULT_BRANCH}$($QUICK && echo ' (as of last fetch)') — git pull before trusting local state"
+      elif [ "${AHEAD:-0}" -gt 0 ]; then
+        warn "local ${DEFAULT_BRANCH} is ${AHEAD} commit(s) AHEAD of origin/${DEFAULT_BRANCH} — unpushed trunk commits are unbacked-up"
+      else
+        note "local ${DEFAULT_BRANCH} matches origin/${DEFAULT_BRANCH}$($QUICK && echo ' (as of last fetch)')"
+      fi
+    fi
+  fi
+
   # ---------- 5b. Branch flow ----------
   # Repos that promote through an integration branch (feature -> staging ->
   # main) must declare it, or agents branch from the wrong trunk and
@@ -239,8 +302,17 @@ JSON
   # that stamp to the latest CODE commit (docs/plan/md excluded) makes doc
   # staleness detectable in one line — so builds don't need a pre-build
   # Validate pass, and a skipped regeneration can never be silent.
+  # Two shapes:
+  #  - single repo: 0-documentation-codebase/.docs-fresh-sha inside the repo
+  #  - multi-repo workspace: the docs live in the PARENT workspace under
+  #    0-documentation-codebase/<stack>/, where each stack dir carries
+  #    .docs-repo (the member repo's directory name) and .docs-fresh-sha
+  #    (that member repo's latest code commit at regeneration time).
   DOCS_DIR=0-documentation-codebase
   STAMP_FILE="$DOCS_DIR/.docs-fresh-sha"
+  latest_code_sha() { # $1 = repo root
+    git -C "$1" log -1 --format=%H -- . ':(exclude)0-documentation-codebase' ':(exclude)0-plan' ':(exclude)0-wip' ':(exclude)*.md' 2>/dev/null || true
+  }
   if [ -d "$DOCS_DIR" ]; then
     LATEST_CODE=$(git log -1 --format=%H -- . ":(exclude)$DOCS_DIR" ':(exclude)0-plan' ':(exclude)0-wip' ':(exclude)*.md' 2>/dev/null || true)
     STAMP=$(head -1 "$STAMP_FILE" 2>/dev/null || true)
@@ -250,6 +322,45 @@ JSON
       warn "codebase docs STALE — stamp ${STAMP:0:7} != latest code commit ${LATEST_CODE:0:7}. Run Documentor Validate/Update before building."
     else
       note "codebase docs fresh (stamp ${STAMP:0:7} matches latest code commit)"
+    fi
+  else
+    REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    WS_DOCS="$(dirname "$REPO_ROOT")/0-documentation-codebase"
+    if [ -n "$REPO_ROOT" ] && [ -d "$WS_DOCS" ]; then
+      WS_ROOT=$(dirname "$REPO_ROOT")
+      REPO_BASE=$(basename "$REPO_ROOT")
+      MY_STACK=""
+      for D in "$WS_DOCS"/*/; do
+        [ -f "${D}.docs-repo" ] || continue
+        [ "$(head -1 "${D}.docs-repo" 2>/dev/null)" = "$REPO_BASE" ] && { MY_STACK="$D"; break; }
+      done
+      if [ -z "$MY_STACK" ]; then
+        warn "workspace docs found ($WS_DOCS) but no stack dir claims repo '$REPO_BASE' via .docs-repo — per-stack freshness cannot be checked; add the mapping file"
+      else
+        SNAME=$(basename "$MY_STACK")
+        STAMP=$(head -1 "${MY_STACK}.docs-fresh-sha" 2>/dev/null || true)
+        LATEST_CODE=$(latest_code_sha "$REPO_ROOT")
+        if [ -z "$STAMP" ]; then
+          warn "workspace docs ($SNAME) have no freshness stamp — run Documentor Update once to create ${SNAME}/.docs-fresh-sha"
+        elif [ -n "$LATEST_CODE" ] && [ "$STAMP" != "$LATEST_CODE" ]; then
+          warn "workspace docs ($SNAME) STALE — stamp ${STAMP:0:7} != this repo's latest code commit ${LATEST_CODE:0:7}. Run Documentor Validate/Update before building."
+        else
+          note "workspace docs ($SNAME) fresh (stamp ${STAMP:0:7} matches this repo's latest code commit)"
+        fi
+        # Cross-stack summary — cheap local reads; sibling repos may be absent.
+        XSUM=""
+        for D in "$WS_DOCS"/*/; do
+          [ -f "${D}.docs-repo" ] || continue
+          SN=$(basename "$D"); RB=$(head -1 "${D}.docs-repo" 2>/dev/null); RR="$WS_ROOT/$RB"
+          if ! git -C "$RR" rev-parse --git-dir >/dev/null 2>&1; then XSUM+="$SN=?(no checkout) "; continue; fi
+          ST=$(head -1 "${D}.docs-fresh-sha" 2>/dev/null || true)
+          LC=$(latest_code_sha "$RR")
+          if [ -z "$ST" ]; then XSUM+="$SN=unstamped "
+          elif [ "$ST" = "$LC" ]; then XSUM+="$SN=fresh "
+          else XSUM+="$SN=STALE "; fi
+        done
+        [ -n "$XSUM" ] && note "cross-stack docs freshness: ${XSUM% }"
+      fi
     fi
   fi
 
@@ -290,6 +401,31 @@ JSON
         note "vercel linked: project=$(jq -r '.projectId // "?"' .vercel/project.json 2>/dev/null)"
       fi
     fi
+  fi
+
+  # ---------- 7b. Documented command availability (full mode only) ----------
+  # The entry file's Tools table promises commands; a command that doesn't
+  # resolve in a non-interactive shell is a false startup blocker. Checks the
+  # first token of each Command cell (shell functions like tcurl/nvm will
+  # correctly show up here — that IS the finding).
+  if ! $QUICK && [ -n "${ENTRYF:-}" ] && grep -q '^## Tools' "$ENTRYF" 2>/dev/null; then
+    MISSCMD=""
+    while IFS= read -r C; do
+      case "$C" in ''|'$'*|'.'|'`'*|Command) continue ;; esac
+      command -v "$C" >/dev/null 2>&1 || MISSCMD+="$C "
+    done < <(awk '/^## Tools/{f=1;next} /^## /{f=0} f && /^\|/ {n=split($0,a,"|"); if (n>3) {c=a[3]; gsub(/`/,"",c); gsub(/^ +| +$/,"",c); split(c,w," "); if (w[1] != "" && w[1] !~ /^-+$/) print w[1]}}' "$ENTRYF" | sort -u)
+    [ -n "$MISSCMD" ] && warn "documented command(s) not resolvable in this shell: ${MISSCMD% }— shell functions/aliases don't exist non-interactively; document the non-interactive form or fix PATH"
+  fi
+
+  # ---------- 7c. Credential scan on tracked files (full mode only) ----------
+  # Tracked == not gitignored: a credentialed DSN here ships to the remote.
+  if ! $QUICK; then
+    CREDF=$(git grep -lIE '[a-z][a-z0-9+]*://[^ :/@"]+:[^@ "]+@' -- . 2>/dev/null \
+      | while IFS= read -r F; do
+          git grep -hIE '[a-z][a-z0-9+]*://[^ :/@"]+:[^@ "]+@' -- "$F" 2>/dev/null \
+            | grep -qviE '(user|username|USER):(pass|password|PASS)[^@]*@|<[^>]*>:|example|\$\{|\$[A-Z_]+@' && echo "$F"
+        done | head -5 | paste -sd', ' -)
+    [ -n "$CREDF" ] && fail "credential-shaped user:pass@ URL in tracked file(s): [${CREDF}] — move secrets to gitignored config and ROTATE anything already pushed"
   fi
 fi
 
